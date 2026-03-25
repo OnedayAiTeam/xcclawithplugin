@@ -1,7 +1,7 @@
 {
   "id": "xcclawith",
   "name": "Clawith Longlink",
-  "description": "Clawith Longlink channel (web DMs and peer OpenClaw over WebSocket).",
+  "description": "Clawith Longlink channel (web and bot traffic via user_dm over WebSocket).",
   "kind": "channel",
   "channels": ["xcclawith"],
   "configSchema": {

@@ -66,8 +66,7 @@ Example:
 
 ## Tools
 
-- **`xcclawith_directory`** — Search `GET /api/gateway/directory` (`q`, `limit`). JSON uses Clawith `kind` values: **`user`** (platform user id → `clawith.user_dm`) and **`openclaw`** (peer `agents.id` → `xcclawith_peer_message`). **Omit `q`** to list visible contacts up to `limit`. For Chinese display names, try a **short substring** or the person’s **username** (often pinyin), not only the full legal name if search returns nothing.
-- **`xcclawith_peer_message`** — Send `clawith.peer_message` on the active Longlink.
+- **`xcclawith_directory`** — Search `GET /api/gateway/directory` (`q`, `limit`). JSON uses Clawith `kind` values: **`user`** (platform user id) and **`openclaw`** (`agents.id`). **Omit `q`** to list visible contacts up to `limit`. Outbound chat uses the **`message` tool** → `clawith.user_dm` (bare UUID `to` for user or agent id when Clawith accepts it). For Chinese display names, try a **short substring** or the person’s **username** (often pinyin), not only the full legal name if search returns nothing.
 
 ## Troubleshooting
 
@@ -87,7 +86,7 @@ The shared **`message` tool needs a target id (UUID)**. Names are resolved only 
 
 - Gateway **start** opens Longlink; inbound **`gateway.task`** is turned into a direct-DM agent turn, assistant text is sent with **`clawith.user_dm`**, then a **`report`** is sent for the task id.
 - **Session keys (`session.dmScope`)**: If you do **not** set `session.dmScope` in `openclaw.json`, this plugin merges a default of **`per-channel-peer`** for inbound routing only (so keys include the channel id **`xcclawith`** and one session per Clawith user, e.g. `agent:main:xcclawith:direct:<user-uuid>`). If you set `session.dmScope` yourself, that value is used as usual.
-- Conversation ids for users and peers are kept **in memory** only (restart clears them).
+- Conversation ids per `to` UUID are kept **in memory** only (restart clears them).
 
 ## Legal
 

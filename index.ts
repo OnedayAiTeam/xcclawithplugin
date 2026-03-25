@@ -5,7 +5,7 @@ import { CHANNEL_ID } from "./src/constants.js";
 export default defineChannelPluginEntry({
   id: CHANNEL_ID,
   name: "Clawith Longlink",
-  description: "Clawith Longlink channel: web DMs and peer OpenClaw over WebSocket.",
+  description: "Clawith Longlink channel: web and bot traffic via `clawith.user_dm` over WebSocket.",
   plugin: xcclawithChannelPlugin,
   registerFull(api) {
     registerXcclawithTools(api);

@@ -7,10 +7,6 @@ export class ClawithMemoryState {
   readonly userConversationIds = new Map<string, string>();
   /** conversation_id -> users.id (reverse lookup) */
   readonly conversationUserIds = new Map<string, string>();
-  /** OpenClaw agent id (peer) -> peer conversation_id */
-  readonly peerConversationIds = new Map<string, string>();
-  /** OpenClaw agent id -> last new_session_id used for peer thread */
-  readonly peerNewSessionIds = new Map<string, string>();
 
   setUserConversation(userId: string, conversationId: string): void {
     void userId;
@@ -47,31 +43,9 @@ export class ClawithMemoryState {
     return this.conversationUserIds.get(conversationId.trim().toLowerCase());
   }
 
-  setPeerConversation(agentId: string, conversationId: string): void {
-    const aid = agentId.trim().toLowerCase();
-    xcConsole("info", "memory", "peerConversation.set", { agentId: aid, conversationId });
-    this.peerConversationIds.set(aid, conversationId.trim());
-  }
-
-  getPeerConversation(agentId: string): string | undefined {
-    return this.peerConversationIds.get(agentId.trim().toLowerCase());
-  }
-
-  setPeerNewSession(agentId: string, sessionId: string): void {
-    const aid = agentId.trim().toLowerCase();
-    xcConsole("info", "memory", "peerNewSession.set", { agentId: aid, sessionId });
-    this.peerNewSessionIds.set(aid, sessionId);
-  }
-
-  getPeerNewSession(agentId: string): string | undefined {
-    return this.peerNewSessionIds.get(agentId.trim().toLowerCase());
-  }
-
   clearAll(): void {
     this.userConversationIds.clear();
     this.conversationUserIds.clear();
-    this.peerConversationIds.clear();
-    this.peerNewSessionIds.clear();
     xcConsole("info", "memory", "clearAll", {});
   }
 }

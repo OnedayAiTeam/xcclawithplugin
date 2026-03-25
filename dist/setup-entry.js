@@ -542,10 +542,6 @@ var ClawithMemoryState = class {
   userConversationIds = /* @__PURE__ */ new Map();
   /** conversation_id -> users.id (reverse lookup) */
   conversationUserIds = /* @__PURE__ */ new Map();
-  /** OpenClaw agent id (peer) -> peer conversation_id */
-  peerConversationIds = /* @__PURE__ */ new Map();
-  /** OpenClaw agent id -> last new_session_id used for peer thread */
-  peerNewSessionIds = /* @__PURE__ */ new Map();
   setUserConversation(userId, conversationId) {
     void userId;
     void conversationId;
@@ -562,27 +558,9 @@ var ClawithMemoryState = class {
   getUserIdForConversation(conversationId) {
     return this.conversationUserIds.get(conversationId.trim().toLowerCase());
   }
-  setPeerConversation(agentId, conversationId) {
-    const aid = agentId.trim().toLowerCase();
-    xcConsole("info", "memory", "peerConversation.set", { agentId: aid, conversationId });
-    this.peerConversationIds.set(aid, conversationId.trim());
-  }
-  getPeerConversation(agentId) {
-    return this.peerConversationIds.get(agentId.trim().toLowerCase());
-  }
-  setPeerNewSession(agentId, sessionId) {
-    const aid = agentId.trim().toLowerCase();
-    xcConsole("info", "memory", "peerNewSession.set", { agentId: aid, sessionId });
-    this.peerNewSessionIds.set(aid, sessionId);
-  }
-  getPeerNewSession(agentId) {
-    return this.peerNewSessionIds.get(agentId.trim().toLowerCase());
-  }
   clearAll() {
     this.userConversationIds.clear();
     this.conversationUserIds.clear();
-    this.peerConversationIds.clear();
-    this.peerNewSessionIds.clear();
     xcConsole("info", "memory", "clearAll", {});
   }
 };
@@ -14436,7 +14414,6 @@ var LonglinkHub = class {
   stopped = false;
   eff;
   userDmAckWaiters = [];
-  peerAckWaiters = [];
   start() {
     this.memory.clearAll();
     this.stopped = false;
@@ -14473,10 +14450,6 @@ var LonglinkHub = class {
   }
   rejectAllAckWaiters(err) {
     for (const w of this.userDmAckWaiters.splice(0)) {
-      clearTimeout(w.timer);
-      w.reject(err);
-    }
-    for (const w of this.peerAckWaiters.splice(0)) {
       clearTimeout(w.timer);
       w.reject(err);
     }
@@ -14530,28 +14503,6 @@ var LonglinkHub = class {
       );
     }
   }
-  settlePeerOk(aidRaw, cidRaw) {
-    const aid = aidRaw.trim().toLowerCase();
-    const cid = cidRaw.trim();
-    const idx = this.peerAckWaiters.findIndex((w) => w.targetAgentId === aid);
-    if (idx >= 0) {
-      const w = this.peerAckWaiters.splice(idx, 1)[0];
-      clearTimeout(w.timer);
-      w.resolve({ conversationId: cid });
-    }
-  }
-  settlePeerFailed(message, agentHint) {
-    if (this.peerAckWaiters.length === 0) return;
-    let idx = -1;
-    if (agentHint) {
-      const a = agentHint.trim().toLowerCase();
-      idx = this.peerAckWaiters.findIndex((w2) => w2.targetAgentId === a);
-    }
-    if (idx < 0) idx = 0;
-    const w = this.peerAckWaiters.splice(idx, 1)[0];
-    clearTimeout(w.timer);
-    w.reject(new Error(`xcclawith_peer_message_failed: ${message}`));
-  }
   scheduleReconnect(ms) {
     if (this.stopped) {
       this.log.debug?.(xcLine("longlink.hub", "reconnect.skipped_stopped", { ms }));
@@ -14592,7 +14543,7 @@ var LonglinkHub = class {
       this.log.info(
         xcLine("longlink.ws", "open", {
           readyState: ws.readyState,
-          meaning: "TLS/WS handshake ok; can send clawith.user_dm / peer_message"
+          meaning: "TLS/WS handshake ok; can send clawith.user_dm"
         })
       );
     });
@@ -14768,35 +14719,30 @@ var LonglinkHub = class {
       if (src === "clawith.peer_message_ok") {
         const cid = frame.payload.conversation_id;
         const aid = frame.payload.target_agent_id;
-        if (typeof cid === "string" && typeof aid === "string") {
-          this.memory.setPeerConversation(aid, cid);
-          this.settlePeerOk(aid, cid);
-          this.log.info(
-            xcLine("longlink.rx", "peer_message_ok", {
-              target_agent_id: aid,
-              conversation_id: cid
-            })
-          );
-        } else {
-          this.log.warn(
-            xcLine("longlink.rx", "peer_message_ok.malformed", { payloadKeys })
-          );
-        }
+        this.log.info(
+          xcLine("longlink.rx", "peer_message_ok.unhandled", {
+            target_agent_id: typeof aid === "string" ? aid : null,
+            conversation_id: typeof cid === "string" ? cid : null,
+            payloadKeys,
+            meaning: "plugin no longer sends peer_message; log only if server still emits"
+          })
+        );
         return;
       }
       if (src === "clawith.peer_message_failed") {
         const msg = String(frame.payload.message ?? "");
         const aid = frame.payload.target_agent_id;
         this.log.warn(
-          xcLine("longlink.rx", "peer_message_failed", {
+          xcLine("longlink.rx", "peer_message_failed.unhandled", {
             message: msg,
+            target_agent_id: typeof aid === "string" ? aid : null,
             code: String(frame.payload.code),
             httpStatus: String(frame.payload.httpStatus),
             retry_after_seconds: String(frame.payload.retry_after_seconds),
-            payloadKeys
+            payloadKeys,
+            meaning: "plugin no longer sends peer_message; log only"
           })
         );
-        this.settlePeerFailed(msg, typeof aid === "string" ? aid : void 0);
         return;
       }
       this.log.warn(
@@ -14921,6 +14867,7 @@ var LonglinkHub = class {
         target_user_id: params.targetUserId,
         conversation_id: params.conversationId ?? null,
         message_id: params.messageId ?? null,
+        requires_reply: params.requiresReply === true,
         content_len: params.content.length,
         meaning: "upstream clawith.user_dm; await user_dm_ok/failed on RX"
       })
@@ -14932,6 +14879,7 @@ var LonglinkHub = class {
     };
     if (params.conversationId) body.conversation_id = params.conversationId;
     if (params.messageId) body.message_id = params.messageId;
+    if (params.requiresReply === true) body.requires_reply = true;
     this.send(body);
   }
   /** Fire-and-forget (no ack wait). Prefer {@link sendUserDmAwaitAck} for outbound tooling. */
@@ -14966,57 +14914,6 @@ var LonglinkHub = class {
       };
       this.userDmAckWaiters.push(holder);
       this.transmitUserDm(params);
-    });
-  }
-  transmitPeerMessage(params) {
-    this.log.info(
-      xcLine("longlink.tx", "sendPeerMessage.build", {
-        target_agent_id: params.targetAgentId,
-        requires_reply: params.requiresReply,
-        conversation_id: params.conversationId ?? null,
-        new_session_id: params.newSessionId ?? null,
-        content_len: params.content.length
-      })
-    );
-    const body = {
-      type: "clawith.peer_message",
-      target_agent_id: params.targetAgentId,
-      content: params.content,
-      requires_reply: params.requiresReply
-    };
-    if (params.conversationId) body.conversation_id = params.conversationId;
-    if (params.newSessionId) body.new_session_id = params.newSessionId;
-    this.send(body);
-  }
-  sendPeerMessage(params) {
-    this.transmitPeerMessage(params);
-  }
-  /**
-   * Sends `clawith.peer_message` and resolves after `peer_message_ok`, or rejects on failed / timeout.
-   */
-  sendPeerMessageAwaitAck(params, timeoutMs = DEFAULT_LONGLINK_ACK_TIMEOUT_MS) {
-    const aid = params.targetAgentId.trim().toLowerCase();
-    return new Promise((resolve, reject) => {
-      let holder;
-      const timer = setTimeout(() => {
-        const i = this.peerAckWaiters.indexOf(holder);
-        if (i >= 0) this.peerAckWaiters.splice(i, 1);
-        reject(new Error(`xcclawith_peer_ack_timeout ${timeoutMs}ms`));
-      }, timeoutMs);
-      holder = {
-        targetAgentId: aid,
-        resolve: (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        reject: (e) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-        timer
-      };
-      this.peerAckWaiters.push(holder);
-      this.transmitPeerMessage(params);
     });
   }
 };
@@ -15125,6 +15022,9 @@ function sessionPeerFromConversationId(conversationId) {
 }
 
 // src/channel.ts
+function outboundRequiresReply(ctx) {
+  return ctx.requiresReply === true || ctx.requires_reply === true;
+}
 function cfgWithXcclawithDmScopeDefault(cfg) {
   if (cfg.session?.dmScope !== void 0) {
     return cfg;
@@ -15228,10 +15128,12 @@ var chatPlugin = createChatChannelPlugin({
       channel: CHANNEL_ID,
       sendText: async (params) => {
         const accountId = normalizeAccountId(params.accountId);
+        const requiresReplyFlag = outboundRequiresReply(params);
         xcConsole("info", "outbound.sendText", "step1.entry", {
           accountId,
           rawTo: params.to,
           openclawThreadId: params.threadId ?? null,
+          requires_reply: requiresReplyFlag,
           note: "threadId ignored for Clawith routing; conversation_id is keyed by `to` only",
           textLen: (params.text ?? "").length
         });
@@ -15276,7 +15178,8 @@ var chatPlugin = createChatChannelPlugin({
         const ack = await hub.sendUserDmAwaitAck({
           targetUserId,
           content: params.text,
-          conversationId
+          conversationId,
+          requiresReply: requiresReplyFlag || void 0
         });
         const finalConv = ack.conversationId.trim();
         memory.setUserConversation(targetUserId, finalConv);
@@ -15303,18 +15206,17 @@ var xcclawithChannelPlugin = {
         if (x && isClawithUserIdShape(x.toLowerCase())) return true;
         return s.length > 0;
       },
-      hint: "Clawith: `to` = UUID (user id or agent id per your platform; disjoint) or names via directory. Per-`to` conversation reuse uses plugin memory keyed by that UUID only \u2014 OpenClaw `threadId` is not used. Peer: xcclawith_peer_message + directory `online`."
+      hint: "Clawith: `to` = bare UUID (users.id or agents.id when Clawith routes it) or directory-resolved user labels. Per-`to` conversation reuse uses plugin memory; OpenClaw `threadId` is not used. Optional `requires_reply` / `requiresReply` on `message` is forwarded on `clawith.user_dm` when true."
     }
   },
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
-      "Clawith / xcclawith: The core OpenClaw `message` tool has **no** `requires_reply` field. Clawith puts reply expectations on **inbound** longlink tasks: `gateway.task` payload `message.requires_reply` or `message.requiresReply` (boolean). That is envelope metadata you infer from the inbound DM / session, not something you pass when calling `message`.",
-      "Clawith / xcclawith: **Outbound** `requires_reply` exists only on **xcclawith_peer_message** (optional boolean), for agent-to-agent longlink \u2014 not on `message`. Use it when you need the peer flow to treat the send as requiring follow-up per Clawith.",
-      "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message \u2014 it will be blocked. kind=user has no online requirement.",
-      "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) \u2192 xcclawith_peer_message; success only after peer_message_ok.",
-      "Clawith / xcclawith: Web DM `conversation_id` is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is global to the process and intentionally ignored \u2014 do not rely on it for Clawith threading.",
-      "Clawith / xcclawith: Inbound OpenClaw session peer id remains clawith-<conversation_id> from the gateway task; that is separate from outbound `threadId`."
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare UUID (users.id or agents.id when the platform accepts it), or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory (kind=user rows only). Sends use longlink `clawith.user_dm` and succeed only after user_dm_ok.",
+      "Clawith / xcclawith: **Outbound** `message` may include **`requires_reply` or `requiresReply` (boolean)** when your OpenClaw build exposes it; this plugin forwards **`true`** onto `clawith.user_dm` as `requires_reply` (omitted when false). Use when Clawith should treat the turn as expecting follow-up / relaxed send pacing per platform rules.",
+      "Clawith / xcclawith: **Inbound** `gateway.task` still carries `message.requires_reply` / `message.requiresReply` on the envelope \u2014 that describes the task you received, separate from what you pass on outbound `message`.",
+      "Clawith / xcclawith: xcclawith_directory: kind=user \u2192 message `to`; kind=openclaw \u2192 bare agents.id as `to` for bot-to-bot when Clawith routes via the same user_dm path. `online` on openclaw rows indicates longlink presence (informational).",
+      "Clawith / xcclawith: `conversation_id` for web DM is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is intentionally ignored for Clawith threading.",
+      "Clawith / xcclawith: Inbound session peer id remains clawith-<conversation_id> from the gateway task; separate from outbound `threadId`."
     ]
   },
   gateway: {
@@ -15463,7 +15365,8 @@ ${chunk}` : chunk;
                 targetUserId: userId,
                 content: chunk,
                 conversationId,
-                messageId: eventId
+                messageId: eventId,
+                requiresReply: requiresReply || void 0
               });
             } catch (e) {
               xcBoth(sink, "error", "gateway.deliver", "user_dm_ack_failed", {

@@ -2,12 +2,7 @@ import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
 import { CHANNEL_ID } from "./constants.js";
-import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
-import { assertStrictClawithAgentId } from "./clawith-target.js";
-import { assertPeerAgentOnlineOrThrow } from "./directory-peer-online.js";
 import { fetchGatewayDirectory } from "./directory-api.js";
-import { getMemory } from "./hub-registry.js";
-import { normalizeAccountId } from "openclaw/plugin-sdk/routing";
 import { resolveEffectiveSection, xcclawithSectionSchema } from "./schema.js";
 import { xcConsole } from "./trace-log.js";
 
@@ -32,11 +27,11 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
     name: "xcclawith_directory",
     label: "Clawith directory",
     description:
-      "Calls GET /api/gateway/directory. Each row may include `online` (kind=openclaw only): false means peer bot is offline — do not xcclawith_peer_message. " +
+      "Calls GET /api/gateway/directory. Each row may include `online` (kind=openclaw only): indicates whether that bot has longlink connected. " +
       "kind=user has no online field / requirement. " +
       "The channel also resolves non-UUID message `to` via this API. " +
       "q optional; omit q to list visible rows (default 20, max 50). " +
-      "kind=user → users.id for DMs; kind=openclaw → agents.id for xcclawith_peer_message.",
+      "kind=user → users.id; kind=openclaw → agents.id — both can be used as message `to` (bare UUID) for `clawith.user_dm` per Clawith routing.",
     parameters: Type.Object({
       q: Type.Optional(
         Type.String({
@@ -92,9 +87,10 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
           "\n\nNo rows: broaden q, try username/pinyin, or omit q to list visible contacts (check Clawith visibility rules).";
       } else {
         text +=
-          "\n\nFor kind=openclaw check `online`: false = peer offline, do not send xcclawith_peer_message. " +
+          "\n\nFor kind=openclaw, `online: false` means that bot is not connected on longlink. " +
           "kind=user: use id as message `to` (user:<uuid> or bare UUID). " +
-          "User DM and peer send only return success after Clawith longlink ack (user_dm_ok / peer_message_ok).";
+          "kind=openclaw: use id as bare UUID in message `to` for bot-to-bot via the same `clawith.user_dm` path when Clawith allows it. " +
+          "Sends only succeed after Clawith returns user_dm_ok.";
       }
       xcConsole("info", "tools.directory", "execute.done", { toolCallId, rowCount: lines.length });
       return {
@@ -104,155 +100,6 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
     },
   };
 
-  const peerTool: AnyAgentTool = {
-    name: "xcclawith_peer_message",
-    label: "Clawith peer OpenClaw message",
-    description:
-      "Send to another OpenClaw via longlink (clawith.peer_message). target_agent_id = agents.id (kind=openclaw). " +
-      "Optional `requires_reply` is **only** on this tool (not on the generic `message` tool). " +
-      "Plugin checks directory: if online=false, send is rejected. Success only after peer_message_ok.",
-    parameters: Type.Object({
-      target_agent_id: Type.String({
-        description: "agents.id UUID from xcclawith_directory (kind=openclaw). Bare UUID only.",
-      }),
-      content: Type.String({ description: "Message body for the peer." }),
-      requires_reply: Type.Optional(
-        Type.Boolean({
-          description:
-            "Peer longlink only. Not available on OpenClaw `message`. If true, Clawith may expect the peer to engage / report; use when the platform marks the turn as needing a reply.",
-        }),
-      ),
-      conversation_id: Type.Optional(
-        Type.String({ description: "Existing peer conversation id if continuing a thread." }),
-      ),
-      new_session_id: Type.Optional(
-        Type.String({
-          description: "UUID for a new peer thread; reuse the same value on retries.",
-        }),
-      ),
-    }),
-    execute: async (toolCallId, params) => {
-      const accountId = normalizeAccountId(null);
-      xcConsole("info", "tools.peer", "execute.begin", {
-        toolCallId,
-        accountId,
-        contentLen: params.content.length,
-      });
-      let hub;
-      try {
-        xcConsole("info", "tools.peer", "ensureHub.before", { accountId });
-        hub = await ensureXcclawithLonglinkHub({
-          cfg: api.config,
-          accountId,
-          connectTimeoutMs: 25_000,
-          log: {
-            info: (m) => api.logger.info?.(m) ?? console.info(m),
-            warn: (m) => api.logger.warn?.(m) ?? console.warn(m),
-            error: (m) => api.logger.error?.(m) ?? console.error(m),
-            debug: (m) => api.logger.debug?.(m),
-          },
-        });
-        xcConsole("info", "tools.peer", "ensureHub.after", { accountId });
-      } catch (e) {
-        xcConsole("error", "tools.peer", "ensureHub.failed", { accountId, err: String(e) });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Longlink not available: ${String(e)}. Check host/longlinkPort and that the Clawith WS is reachable.`,
-            },
-          ],
-          details: { status: "failed" as const },
-        };
-      }
-      const memory = getMemory(accountId);
-      let agentId: string;
-      try {
-        agentId = assertStrictClawithAgentId(params.target_agent_id);
-      } catch (e) {
-        const msg = String(e);
-        xcConsole("warn", "tools.peer", "agent_id_rejected", { toolCallId, msg });
-        api.logger.warn?.(`[xcclawith] tool=xcclawith_peer_message reject ${msg}`);
-        return {
-          content: [{ type: "text", text: msg }],
-          details: { status: "rejected" as const },
-        };
-      }
-      api.logger.info?.(
-        `[xcclawith] tool=xcclawith_peer_message send target_agent_id=${agentId} requires_reply=${params.requires_reply ?? false} content_len=${params.content.length}`,
-      );
-      const section = readEffectiveSection(api);
-      try {
-        await assertPeerAgentOnlineOrThrow({ section, agentId });
-      } catch (e) {
-        const msg = String(e);
-        if (msg.includes("xcclawith_peer_offline")) {
-          xcConsole("warn", "tools.peer", "blocked_offline", { toolCallId, agentId });
-          return {
-            content: [{ type: "text", text: msg }],
-            details: { status: "rejected" as const, reason: "offline" as const },
-          };
-        }
-        throw e;
-      }
-      const conv =
-        params.conversation_id ?? memory.getPeerConversation(agentId) ?? undefined;
-      let newSession = params.new_session_id ?? memory.getPeerNewSession(agentId);
-      xcConsole("info", "tools.peer", "routing_state", {
-        explicitConversationId: params.conversation_id ?? null,
-        memoryConversationId: conv ?? null,
-        explicitNewSession: params.new_session_id ?? null,
-        memoryNewSession: newSession ?? null,
-      });
-      if (!conv && !newSession) {
-        newSession = crypto.randomUUID();
-        memory.setPeerNewSession(agentId, newSession);
-        xcConsole("info", "tools.peer", "new_session_allocated", { agentId, newSession });
-      }
-      xcConsole("info", "tools.peer", "sendPeerMessage.calling", {
-        agentId,
-        requiresReply: params.requires_reply ?? false,
-        conversationId: conv ?? null,
-        newSessionId: newSession ?? null,
-      });
-      try {
-        const ack = await hub.sendPeerMessageAwaitAck({
-          targetAgentId: agentId,
-          content: params.content,
-          requiresReply: params.requires_reply ?? false,
-          conversationId: conv,
-          newSessionId: newSession,
-        });
-        xcConsole("info", "tools.peer", "execute.ok", {
-          toolCallId,
-          agentId,
-          conversationId: ack.conversationId,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Peer message delivered (peer_message_ok). conversation_id=${ack.conversationId}`,
-            },
-          ],
-          details: {
-            status: "ok" as const,
-            target_agent_id: agentId,
-            conversation_id: ack.conversationId,
-          },
-        };
-      } catch (e) {
-        const msg = String(e);
-        xcConsole("error", "tools.peer", "execute.ack_failed", { toolCallId, agentId, err: msg });
-        return {
-          content: [{ type: "text", text: `Peer message failed: ${msg}` }],
-          details: { status: "failed" as const, target_agent_id: agentId },
-        };
-      }
-    },
-  };
-
   api.registerTool(directoryTool);
-  api.registerTool(peerTool, { optional: true });
-  xcConsole("info", "tools", "register.done", { tools: ["xcclawith_directory", "xcclawith_peer_message"] });
+  xcConsole("info", "tools", "register.done", { tools: ["xcclawith_directory"] });
 }

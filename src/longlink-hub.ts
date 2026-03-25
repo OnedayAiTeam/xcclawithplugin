@@ -14,13 +14,6 @@ type UserDmAckWaiter = {
   timer: ReturnType<typeof setTimeout>;
 };
 
-type PeerAckWaiter = {
-  targetAgentId: string;
-  resolve: (v: { conversationId: string }) => void;
-  reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-};
-
 type LogSink = {
   info: (m: string) => void;
   warn: (m: string) => void;
@@ -46,7 +39,6 @@ export class LonglinkHub {
   private stopped = false;
   private readonly eff: ReturnType<typeof resolveEffectiveSection>;
   private readonly userDmAckWaiters: UserDmAckWaiter[] = [];
-  private readonly peerAckWaiters: PeerAckWaiter[] = [];
 
   constructor(
     _section: XcclawithSection,
@@ -108,10 +100,6 @@ export class LonglinkHub {
       clearTimeout(w.timer);
       w.reject(err);
     }
-    for (const w of this.peerAckWaiters.splice(0)) {
-      clearTimeout(w.timer);
-      w.reject(err);
-    }
   }
 
   /**
@@ -167,30 +155,6 @@ export class LonglinkHub {
     }
   }
 
-  private settlePeerOk(aidRaw: string, cidRaw: string): void {
-    const aid = aidRaw.trim().toLowerCase();
-    const cid = cidRaw.trim();
-    const idx = this.peerAckWaiters.findIndex((w) => w.targetAgentId === aid);
-    if (idx >= 0) {
-      const w = this.peerAckWaiters.splice(idx, 1)[0]!;
-      clearTimeout(w.timer);
-      w.resolve({ conversationId: cid });
-    }
-  }
-
-  private settlePeerFailed(message: string, agentHint?: string): void {
-    if (this.peerAckWaiters.length === 0) return;
-    let idx = -1;
-    if (agentHint) {
-      const a = agentHint.trim().toLowerCase();
-      idx = this.peerAckWaiters.findIndex((w) => w.targetAgentId === a);
-    }
-    if (idx < 0) idx = 0;
-    const w = this.peerAckWaiters.splice(idx, 1)[0]!;
-    clearTimeout(w.timer);
-    w.reject(new Error(`xcclawith_peer_message_failed: ${message}`));
-  }
-
   private scheduleReconnect(ms: number): void {
     if (this.stopped) {
       this.log.debug?.(xcLine("longlink.hub", "reconnect.skipped_stopped", { ms }));
@@ -234,7 +198,7 @@ export class LonglinkHub {
       this.log.info(
         xcLine("longlink.ws", "open", {
           readyState: ws.readyState,
-          meaning: "TLS/WS handshake ok; can send clawith.user_dm / peer_message",
+          meaning: "TLS/WS handshake ok; can send clawith.user_dm",
         }),
       );
     });
@@ -428,20 +392,14 @@ export class LonglinkHub {
       if (src === "clawith.peer_message_ok") {
         const cid = frame.payload.conversation_id;
         const aid = frame.payload.target_agent_id;
-        if (typeof cid === "string" && typeof aid === "string") {
-          this.memory.setPeerConversation(aid, cid);
-          this.settlePeerOk(aid, cid);
-          this.log.info(
-            xcLine("longlink.rx", "peer_message_ok", {
-              target_agent_id: aid,
-              conversation_id: cid,
-            }),
-          );
-        } else {
-          this.log.warn(
-            xcLine("longlink.rx", "peer_message_ok.malformed", { payloadKeys }),
-          );
-        }
+        this.log.info(
+          xcLine("longlink.rx", "peer_message_ok.unhandled", {
+            target_agent_id: typeof aid === "string" ? aid : null,
+            conversation_id: typeof cid === "string" ? cid : null,
+            payloadKeys,
+            meaning: "plugin no longer sends peer_message; log only if server still emits",
+          }),
+        );
         return;
       }
 
@@ -449,15 +407,16 @@ export class LonglinkHub {
         const msg = String(frame.payload.message ?? "");
         const aid = frame.payload.target_agent_id;
         this.log.warn(
-          xcLine("longlink.rx", "peer_message_failed", {
+          xcLine("longlink.rx", "peer_message_failed.unhandled", {
             message: msg,
+            target_agent_id: typeof aid === "string" ? aid : null,
             code: String(frame.payload.code),
             httpStatus: String(frame.payload.httpStatus),
             retry_after_seconds: String(frame.payload.retry_after_seconds),
             payloadKeys,
+            meaning: "plugin no longer sends peer_message; log only",
           }),
         );
-        this.settlePeerFailed(msg, typeof aid === "string" ? aid : undefined);
         return;
       }
 
@@ -599,12 +558,14 @@ export class LonglinkHub {
     content: string;
     conversationId?: string;
     messageId?: string;
+    requiresReply?: boolean;
   }): void {
     this.log.info(
       xcLine("longlink.tx", "sendUserDm.build", {
         target_user_id: params.targetUserId,
         conversation_id: params.conversationId ?? null,
         message_id: params.messageId ?? null,
+        requires_reply: params.requiresReply === true,
         content_len: params.content.length,
         meaning: "upstream clawith.user_dm; await user_dm_ok/failed on RX",
       }),
@@ -616,6 +577,7 @@ export class LonglinkHub {
     };
     if (params.conversationId) body.conversation_id = params.conversationId;
     if (params.messageId) body.message_id = params.messageId;
+    if (params.requiresReply === true) body.requires_reply = true;
     this.send(body);
   }
 
@@ -625,6 +587,7 @@ export class LonglinkHub {
     content: string;
     conversationId?: string;
     messageId?: string;
+    requiresReply?: boolean;
   }): void {
     this.transmitUserDm(params);
   }
@@ -638,6 +601,7 @@ export class LonglinkHub {
       content: string;
       conversationId?: string;
       messageId?: string;
+      requiresReply?: boolean;
     },
     timeoutMs: number = DEFAULT_LONGLINK_ACK_TIMEOUT_MS,
   ): Promise<{ conversationId: string }> {
@@ -665,81 +629,6 @@ export class LonglinkHub {
       };
       this.userDmAckWaiters.push(holder);
       this.transmitUserDm(params);
-    });
-  }
-
-  private transmitPeerMessage(params: {
-    targetAgentId: string;
-    content: string;
-    requiresReply: boolean;
-    conversationId?: string;
-    newSessionId?: string;
-  }): void {
-    this.log.info(
-      xcLine("longlink.tx", "sendPeerMessage.build", {
-        target_agent_id: params.targetAgentId,
-        requires_reply: params.requiresReply,
-        conversation_id: params.conversationId ?? null,
-        new_session_id: params.newSessionId ?? null,
-        content_len: params.content.length,
-      }),
-    );
-    const body: Record<string, unknown> = {
-      type: "clawith.peer_message",
-      target_agent_id: params.targetAgentId,
-      content: params.content,
-      requires_reply: params.requiresReply,
-    };
-    if (params.conversationId) body.conversation_id = params.conversationId;
-    if (params.newSessionId) body.new_session_id = params.newSessionId;
-    this.send(body);
-  }
-
-  sendPeerMessage(params: {
-    targetAgentId: string;
-    content: string;
-    requiresReply: boolean;
-    conversationId?: string;
-    newSessionId?: string;
-  }): void {
-    this.transmitPeerMessage(params);
-  }
-
-  /**
-   * Sends `clawith.peer_message` and resolves after `peer_message_ok`, or rejects on failed / timeout.
-   */
-  sendPeerMessageAwaitAck(
-    params: {
-      targetAgentId: string;
-      content: string;
-      requiresReply: boolean;
-      conversationId?: string;
-      newSessionId?: string;
-    },
-    timeoutMs: number = DEFAULT_LONGLINK_ACK_TIMEOUT_MS,
-  ): Promise<{ conversationId: string }> {
-    const aid = params.targetAgentId.trim().toLowerCase();
-    return new Promise((resolve, reject) => {
-      let holder: PeerAckWaiter;
-      const timer = setTimeout(() => {
-        const i = this.peerAckWaiters.indexOf(holder);
-        if (i >= 0) this.peerAckWaiters.splice(i, 1);
-        reject(new Error(`xcclawith_peer_ack_timeout ${timeoutMs}ms`));
-      }, timeoutMs);
-      holder = {
-        targetAgentId: aid,
-        resolve: (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        reject: (e) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-        timer,
-      };
-      this.peerAckWaiters.push(holder);
-      this.transmitPeerMessage(params);
     });
   }
 }

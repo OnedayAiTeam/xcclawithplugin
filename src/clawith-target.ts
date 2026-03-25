@@ -51,36 +51,9 @@ export function assertStrictClawithUserDmTarget(raw: string): string {
       afterStrip: s,
     });
     throw new Error(
-      `xcclawith_to_must_be_users_id to=${JSON.stringify(raw)} — pass only bare users.id UUID or user:<uuid> from tool xcclawith_directory (kind=user, field id). Display names, @handles, and emails are not accepted. For another OpenClaw use xcclawith_peer_message with target_agent_id (agents.id from kind=openclaw).`,
+      `xcclawith_to_must_be_users_id to=${JSON.stringify(raw)} — pass only bare users.id UUID or user:<uuid> from tool xcclawith_directory (kind=user, field id). Display names, @handles, and emails are not accepted. For another OpenClaw bot use message \"to\" = bare agents.id from xcclawith_directory (kind=openclaw) when Clawith routes it via user_dm.`,
     );
   }
   xcConsole("info", "target", "assertUserDm.ok", { userId: lower, hadUserPrefix });
-  return lower;
-}
-
-/** Peer longlink `target_agent_id` must be a bare agents.id UUID (directory kind=openclaw). */
-export function assertStrictClawithAgentId(raw: string): string {
-  let s = (raw ?? "").trim();
-  if (!s) {
-    xcConsole("warn", "target", "assertAgentId.reject", { reason: "empty", raw: raw ?? null });
-    throw new Error(
-      "xcclawith_empty_target_agent_id — xcclawith_peer_message.target_agent_id is required (UUID from xcclawith_directory kind=openclaw).",
-    );
-  }
-  const hadAgentPrefix = s.toLowerCase().startsWith("agent:");
-  if (hadAgentPrefix) s = s.slice(6).trim();
-  const lower = s.toLowerCase();
-  if (!isClawithUserIdShape(lower)) {
-    xcConsole("warn", "target", "assertAgentId.reject", {
-      reason: "not_uuid",
-      raw,
-      hadAgentPrefix,
-      afterStrip: s,
-    });
-    throw new Error(
-      `xcclawith_target_agent_id_must_be_uuid got=${JSON.stringify(raw)} — use xcclawith_directory, take kind=openclaw row id as target_agent_id.`,
-    );
-  }
-  xcConsole("info", "target", "assertAgentId.ok", { agentId: lower, hadAgentPrefix });
   return lower;
 }

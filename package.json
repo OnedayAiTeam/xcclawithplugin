@@ -1,7 +1,7 @@
 {
   "name": "xcclawith",
   "version": "1.0.0",
-  "description": "OpenClaw channel plugin for Clawith Longlink (web chat + peer bots).",
+  "description": "OpenClaw channel plugin for Clawith Longlink (user_dm over WebSocket).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -34,7 +34,7 @@
     "channel": {
       "id": "xcclawith",
       "label": "Clawith",
-      "blurb": "Web DMs and peer OpenClaw via Clawith Longlink."
+      "blurb": "Clawith web and bot chat via Longlink user_dm."
     }
   },
   "peerDependencies": {

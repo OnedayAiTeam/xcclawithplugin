@@ -29,6 +29,12 @@ import { xcBoth, xcConsole } from "./trace-log.js";
 
 export type ResolvedXcclawith = XcclawithSection & { accountId: string };
 
+type OutboundRequiresReplyCtx = { requiresReply?: boolean; requires_reply?: boolean };
+
+function outboundRequiresReply(ctx: OutboundRequiresReplyCtx): boolean {
+  return ctx.requiresReply === true || ctx.requires_reply === true;
+}
+
 /**
  * Core routing uses `cfg.session?.dmScope ?? "main"`, which maps every inbound DM to
  * `agent:<agentId>:main` and mixes all Clawith web users into one session.
@@ -147,10 +153,12 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
       channel: CHANNEL_ID,
       sendText: async (params) => {
         const accountId = normalizeAccountId(params.accountId);
+        const requiresReplyFlag = outboundRequiresReply(params as OutboundRequiresReplyCtx);
         xcConsole("info", "outbound.sendText", "step1.entry", {
           accountId,
           rawTo: params.to,
           openclawThreadId: params.threadId ?? null,
+          requires_reply: requiresReplyFlag,
           note: "threadId ignored for Clawith routing; conversation_id is keyed by `to` only",
           textLen: (params.text ?? "").length,
         });
@@ -197,6 +205,7 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
           targetUserId,
           content: params.text,
           conversationId,
+          requiresReply: requiresReplyFlag || undefined,
         });
         const finalConv = ack.conversationId.trim();
         memory.setUserConversation(targetUserId, finalConv);
@@ -224,18 +233,17 @@ export const xcclawithChannelPlugin = {
         if (x && isClawithUserIdShape(x.toLowerCase())) return true;
         return s.length > 0;
       },
-      hint: "Clawith: `to` = UUID (user id or agent id per your platform; disjoint) or names via directory. Per-`to` conversation reuse uses plugin memory keyed by that UUID only — OpenClaw `threadId` is not used. Peer: xcclawith_peer_message + directory `online`.",
+      hint: "Clawith: `to` = bare UUID (users.id or agents.id when Clawith routes it) or directory-resolved user labels. Per-`to` conversation reuse uses plugin memory; OpenClaw `threadId` is not used. Optional `requires_reply` / `requiresReply` on `message` is forwarded on `clawith.user_dm` when true.",
     },
   },
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or 中文 / 拼音 / @昵称 / email — non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
-      "Clawith / xcclawith: The core OpenClaw `message` tool has **no** `requires_reply` field. Clawith puts reply expectations on **inbound** longlink tasks: `gateway.task` payload `message.requires_reply` or `message.requiresReply` (boolean). That is envelope metadata you infer from the inbound DM / session, not something you pass when calling `message`.",
-      "Clawith / xcclawith: **Outbound** `requires_reply` exists only on **xcclawith_peer_message** (optional boolean), for agent-to-agent longlink — not on `message`. Use it when you need the peer flow to treat the send as requiring follow-up per Clawith.",
-      "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message — it will be blocked. kind=user has no online requirement.",
-      "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) → xcclawith_peer_message; success only after peer_message_ok.",
-      "Clawith / xcclawith: Web DM `conversation_id` is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is global to the process and intentionally ignored — do not rely on it for Clawith threading.",
-      "Clawith / xcclawith: Inbound OpenClaw session peer id remains clawith-<conversation_id> from the gateway task; that is separate from outbound `threadId`.",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare UUID (users.id or agents.id when the platform accepts it), or 中文 / 拼音 / @昵称 / email — non-UUID is resolved via GET /api/gateway/directory (kind=user rows only). Sends use longlink `clawith.user_dm` and succeed only after user_dm_ok.",
+      "Clawith / xcclawith: **Outbound** `message` may include **`requires_reply` or `requiresReply` (boolean)** when your OpenClaw build exposes it; this plugin forwards **`true`** onto `clawith.user_dm` as `requires_reply` (omitted when false). Use when Clawith should treat the turn as expecting follow-up / relaxed send pacing per platform rules.",
+      "Clawith / xcclawith: **Inbound** `gateway.task` still carries `message.requires_reply` / `message.requiresReply` on the envelope — that describes the task you received, separate from what you pass on outbound `message`.",
+      "Clawith / xcclawith: xcclawith_directory: kind=user → message `to`; kind=openclaw → bare agents.id as `to` for bot-to-bot when Clawith routes via the same user_dm path. `online` on openclaw rows indicates longlink presence (informational).",
+      "Clawith / xcclawith: `conversation_id` for web DM is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is intentionally ignored for Clawith threading.",
+      "Clawith / xcclawith: Inbound session peer id remains clawith-<conversation_id> from the gateway task; separate from outbound `threadId`.",
     ],
   },
   gateway: {
@@ -401,6 +409,7 @@ export const xcclawithChannelPlugin = {
                 content: chunk,
                 conversationId,
                 messageId: eventId,
+                requiresReply: requiresReply || undefined,
               });
             } catch (e) {
               xcBoth(sink, "error", "gateway.deliver", "user_dm_ack_failed", {
