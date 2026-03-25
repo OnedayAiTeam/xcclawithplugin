@@ -40,20 +40,22 @@ export class ClawithMemoryState {
   }
 
   setPeerConversation(agentId: string, conversationId: string): void {
-    xcConsole("info", "memory", "peerConversation.set", { agentId, conversationId });
-    this.peerConversationIds.set(agentId, conversationId);
+    const aid = agentId.trim().toLowerCase();
+    xcConsole("info", "memory", "peerConversation.set", { agentId: aid, conversationId });
+    this.peerConversationIds.set(aid, conversationId.trim());
   }
 
   getPeerConversation(agentId: string): string | undefined {
-    return this.peerConversationIds.get(agentId);
+    return this.peerConversationIds.get(agentId.trim().toLowerCase());
   }
 
   setPeerNewSession(agentId: string, sessionId: string): void {
-    xcConsole("info", "memory", "peerNewSession.set", { agentId, sessionId });
-    this.peerNewSessionIds.set(agentId, sessionId);
+    const aid = agentId.trim().toLowerCase();
+    xcConsole("info", "memory", "peerNewSession.set", { agentId: aid, sessionId });
+    this.peerNewSessionIds.set(aid, sessionId);
   }
 
   getPeerNewSession(agentId: string): string | undefined {
-    return this.peerNewSessionIds.get(agentId);
+    return this.peerNewSessionIds.get(agentId.trim().toLowerCase());
   }
 }

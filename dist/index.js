@@ -22,6 +22,7 @@ var DIRECTORY_HTTP_PATH = "/api/gateway/directory";
 var DEFAULT_DIRECTORY_PORT = 3008;
 var DEFAULT_LONGLINK_PORT = 38438;
 var DEFAULT_LONGLINK_USER_ID = "agent0323";
+var DEFAULT_LONGLINK_ACK_TIMEOUT_MS = 6e4;
 
 // src/gateway-payload.ts
 function pickString(obj, keys) {
@@ -380,6 +381,152 @@ async function fetchGatewayDirectory(params) {
   return { items };
 }
 
+// src/clawith-target.ts
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function isClawithUserIdShape(s) {
+  return UUID.test(s);
+}
+function assertStrictClawithAgentId(raw) {
+  let s = (raw ?? "").trim();
+  if (!s) {
+    xcConsole("warn", "target", "assertAgentId.reject", { reason: "empty", raw: raw ?? null });
+    throw new Error(
+      "xcclawith_empty_target_agent_id \u2014 xcclawith_peer_message.target_agent_id is required (UUID from xcclawith_directory kind=openclaw)."
+    );
+  }
+  const hadAgentPrefix = s.toLowerCase().startsWith("agent:");
+  if (hadAgentPrefix) s = s.slice(6).trim();
+  const lower = s.toLowerCase();
+  if (!isClawithUserIdShape(lower)) {
+    xcConsole("warn", "target", "assertAgentId.reject", {
+      reason: "not_uuid",
+      raw,
+      hadAgentPrefix,
+      afterStrip: s
+    });
+    throw new Error(
+      `xcclawith_target_agent_id_must_be_uuid got=${JSON.stringify(raw)} \u2014 use xcclawith_directory, take kind=openclaw row id as target_agent_id.`
+    );
+  }
+  xcConsole("info", "target", "assertAgentId.ok", { agentId: lower, hadAgentPrefix });
+  return lower;
+}
+
+// src/directory-resolve.ts
+function stripAtHandle(s) {
+  return s.trim().replace(/^@+/, "").trim();
+}
+var HYPHEN_CLASS = /[-\u2010-\u2015\u2212\uff0d]/g;
+function normalizeTargetLabel(s) {
+  let t = s.trim().toLowerCase();
+  t = t.replace(HYPHEN_CLASS, "-");
+  t = t.replace(/\s*-\s*/g, "-");
+  t = t.replace(/\s+/g, "");
+  return t;
+}
+function exactMatchUserRow(item, needleRaw) {
+  if (item.kind !== "user") return false;
+  const needle = needleRaw.trim().toLowerCase();
+  if (!needle) return false;
+  const u = (item.username ?? "").trim().toLowerCase();
+  if (u === needle) return true;
+  const eFull = (item.email ?? "").trim().toLowerCase();
+  if (eFull === needle) return true;
+  if (!needle.includes("@") && eFull.includes("@")) {
+    const local = eFull.split("@")[0] ?? "";
+    if (local === needle) return true;
+  }
+  const dRaw = (item.display_name ?? "").trim();
+  const d = dRaw.toLowerCase();
+  if (d === needle) return true;
+  const nn = normalizeTargetLabel(needleRaw);
+  const nd = normalizeTargetLabel(dRaw);
+  if (nd && nn === nd) return true;
+  if (nd.length > 0 && nn.startsWith(nd) && nn.length > nd.length) {
+    const rest = nn.slice(nd.length);
+    if (rest.startsWith("-")) return true;
+  }
+  return false;
+}
+function pickExactUsers(items, needle) {
+  return items.filter((i) => exactMatchUserRow(i, needle));
+}
+function tryBareUserUuid(rawTo) {
+  let s = stripAtHandle(rawTo);
+  if (!s) return void 0;
+  if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
+  if (!s) return void 0;
+  const lower = s.toLowerCase();
+  return isClawithUserIdShape(lower) ? lower : void 0;
+}
+async function resolveOutboundTargetToUserId(params) {
+  const fast = tryBareUserUuid(params.rawTo);
+  if (fast) {
+    xcConsole("info", "directory.resolve", "uuid_fast_path", {
+      rawTo: params.rawTo,
+      userId: fast
+    });
+    return fast;
+  }
+  const needle = stripAtHandle(params.rawTo);
+  if (!needle) {
+    throw new Error("xcclawith_empty_target");
+  }
+  xcConsole("info", "directory.resolve", "directory_lookup.begin", {
+    rawTo: params.rawTo,
+    needle
+  });
+  let items = (await fetchGatewayDirectory({
+    section: params.section,
+    q: needle,
+    limit: 50,
+    log: params.log
+  })).items;
+  let matches = pickExactUsers(items, needle);
+  const countUsers = () => items.filter((i) => i.kind === "user").length;
+  if (matches.length === 0 && countUsers() === 0 && !needle.includes("@")) {
+    const short = needle.split(HYPHEN_CLASS)[0]?.trim() ?? "";
+    if (short.length >= 1 && short !== needle) {
+      xcConsole("info", "directory.resolve", "retry_q_shorter_segment", { short, fullNeedle: needle });
+      items = (await fetchGatewayDirectory({
+        section: params.section,
+        q: short,
+        limit: 50,
+        log: params.log
+      })).items;
+      matches = pickExactUsers(items, needle);
+    }
+  }
+  if (matches.length === 0 && countUsers() === 1) {
+    const only = items.find((i) => i.kind === "user");
+    matches = [only];
+    xcConsole("warn", "directory.resolve", "single_user_row_fallback", {
+      needle,
+      pickedUserId: only.id,
+      display_name: only.display_name,
+      meaning: "directory returned one kind=user row; using it though label match was not exact"
+    });
+  }
+  if (matches.length === 1) {
+    const id = matches[0].id;
+    xcConsole("info", "directory.resolve", "resolved", {
+      rawTo: params.rawTo,
+      needle,
+      userId: id,
+      via: "directory"
+    });
+    return id;
+  }
+  if (matches.length === 0) {
+    throw new Error(
+      `xcclawith_no_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} \u2014 no kind=user resolved; try xcclawith_directory, another q, or user:<uuid>.`
+    );
+  }
+  throw new Error(
+    `xcclawith_ambiguous_directory_match to=${JSON.stringify(params.rawTo)} count=${matches.length} \u2014 use user:<uuid>.`
+  );
+}
+
 // src/memory-state.ts
 var ClawithMemoryState = class {
   /** Clawith users.id -> web DM conversation_id (converter) */
@@ -415,18 +562,20 @@ var ClawithMemoryState = class {
     return this.conversationUserIds.get(conversationId.trim().toLowerCase());
   }
   setPeerConversation(agentId, conversationId) {
-    xcConsole("info", "memory", "peerConversation.set", { agentId, conversationId });
-    this.peerConversationIds.set(agentId, conversationId);
+    const aid = agentId.trim().toLowerCase();
+    xcConsole("info", "memory", "peerConversation.set", { agentId: aid, conversationId });
+    this.peerConversationIds.set(aid, conversationId.trim());
   }
   getPeerConversation(agentId) {
-    return this.peerConversationIds.get(agentId);
+    return this.peerConversationIds.get(agentId.trim().toLowerCase());
   }
   setPeerNewSession(agentId, sessionId) {
-    xcConsole("info", "memory", "peerNewSession.set", { agentId, sessionId });
-    this.peerNewSessionIds.set(agentId, sessionId);
+    const aid = agentId.trim().toLowerCase();
+    xcConsole("info", "memory", "peerNewSession.set", { agentId: aid, sessionId });
+    this.peerNewSessionIds.set(aid, sessionId);
   }
   getPeerNewSession(agentId) {
-    return this.peerNewSessionIds.get(agentId);
+    return this.peerNewSessionIds.get(agentId.trim().toLowerCase());
   }
 };
 
@@ -14278,6 +14427,8 @@ var LonglinkHub = class {
   reconnectTimer = null;
   stopped = false;
   eff;
+  userDmAckWaiters = [];
+  peerAckWaiters = [];
   start() {
     this.stopped = false;
     this.log.info(xcLine("longlink.hub", "start", { note: "connect() scheduled, abort listener registered" }));
@@ -14309,6 +14460,71 @@ var LonglinkHub = class {
       this.ws = null;
     }
     this.log.info(xcLine("longlink.hub", "stop.complete", { meaning: "no more reconnects until start()" }));
+    this.rejectAllAckWaiters(new Error("xcclawith_longlink_stopped"));
+  }
+  rejectAllAckWaiters(err) {
+    for (const w of this.userDmAckWaiters.splice(0)) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
+    for (const w of this.peerAckWaiters.splice(0)) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
+  }
+  settleUserDmOk(uidRaw, cidRaw) {
+    const uid = uidRaw.trim().toLowerCase();
+    const cid = cidRaw.trim().toLowerCase();
+    const idx = this.userDmAckWaiters.findIndex(
+      (w) => w.targetUserId === uid && w.conversationId === cid
+    );
+    if (idx >= 0) {
+      const w = this.userDmAckWaiters.splice(idx, 1)[0];
+      clearTimeout(w.timer);
+      w.resolve({ conversationId: cidRaw.trim() });
+    }
+  }
+  settleUserDmFailed(message, targetHint) {
+    if (this.userDmAckWaiters.length === 0) return;
+    let idx = -1;
+    if (targetHint) {
+      const t = targetHint.trim().toLowerCase();
+      idx = this.userDmAckWaiters.findIndex((w2) => w2.targetUserId === t);
+    }
+    if (idx < 0) idx = 0;
+    const w = this.userDmAckWaiters.splice(idx, 1)[0];
+    clearTimeout(w.timer);
+    w.reject(new Error(`xcclawith_user_dm_failed: ${message}`));
+    if (this.userDmAckWaiters.length > 0) {
+      this.log.warn(
+        xcLine("longlink.ack", "user_dm_failed.fifo_used_with_pending", {
+          remaining: this.userDmAckWaiters.length,
+          meaning: "multiple user_dm in flight; confirm serial sends or match by target if server adds fields"
+        })
+      );
+    }
+  }
+  settlePeerOk(aidRaw, cidRaw) {
+    const aid = aidRaw.trim().toLowerCase();
+    const cid = cidRaw.trim();
+    const idx = this.peerAckWaiters.findIndex((w) => w.targetAgentId === aid);
+    if (idx >= 0) {
+      const w = this.peerAckWaiters.splice(idx, 1)[0];
+      clearTimeout(w.timer);
+      w.resolve({ conversationId: cid });
+    }
+  }
+  settlePeerFailed(message, agentHint) {
+    if (this.peerAckWaiters.length === 0) return;
+    let idx = -1;
+    if (agentHint) {
+      const a = agentHint.trim().toLowerCase();
+      idx = this.peerAckWaiters.findIndex((w2) => w2.targetAgentId === a);
+    }
+    if (idx < 0) idx = 0;
+    const w = this.peerAckWaiters.splice(idx, 1)[0];
+    clearTimeout(w.timer);
+    w.reject(new Error(`xcclawith_peer_message_failed: ${message}`));
   }
   scheduleReconnect(ms) {
     if (this.stopped) {
@@ -14475,6 +14691,7 @@ var LonglinkHub = class {
         const uid = frame.payload.target_user_id;
         if (typeof cid === "string" && typeof uid === "string") {
           this.memory.setUserConversation(uid, cid);
+          this.settleUserDmOk(uid, cid);
           this.log.info(
             xcLine("longlink.rx", "user_dm_ok", {
               target_user_id: uid,
@@ -14506,6 +14723,7 @@ var LonglinkHub = class {
             meaning: msg.includes("not found") || msg.includes("Not found") ? "users.id unknown to gateway or not visible to this bot" : "see message from Clawith"
           })
         );
+        this.settleUserDmFailed(msg, typeof tid === "string" ? tid : void 0);
         return;
       }
       if (src === "clawith.peer_message_ok") {
@@ -14513,6 +14731,7 @@ var LonglinkHub = class {
         const aid = frame.payload.target_agent_id;
         if (typeof cid === "string" && typeof aid === "string") {
           this.memory.setPeerConversation(aid, cid);
+          this.settlePeerOk(aid, cid);
           this.log.info(
             xcLine("longlink.rx", "peer_message_ok", {
               target_agent_id: aid,
@@ -14527,15 +14746,18 @@ var LonglinkHub = class {
         return;
       }
       if (src === "clawith.peer_message_failed") {
+        const msg = String(frame.payload.message ?? "");
+        const aid = frame.payload.target_agent_id;
         this.log.warn(
           xcLine("longlink.rx", "peer_message_failed", {
-            message: String(frame.payload.message),
+            message: msg,
             code: String(frame.payload.code),
             httpStatus: String(frame.payload.httpStatus),
             retry_after_seconds: String(frame.payload.retry_after_seconds),
             payloadKeys
           })
         );
+        this.settlePeerFailed(msg, typeof aid === "string" ? aid : void 0);
         return;
       }
       this.log.warn(
@@ -14654,7 +14876,7 @@ var LonglinkHub = class {
       requires_reply: params.requiresReply
     });
   }
-  sendUserDm(params) {
+  transmitUserDm(params) {
     this.log.info(
       xcLine("longlink.tx", "sendUserDm.build", {
         target_user_id: params.targetUserId,
@@ -14673,7 +14895,41 @@ var LonglinkHub = class {
     if (params.messageId) body.message_id = params.messageId;
     this.send(body);
   }
-  sendPeerMessage(params) {
+  /** Fire-and-forget (no ack wait). Prefer {@link sendUserDmAwaitAck} for outbound tooling. */
+  sendUserDm(params) {
+    this.transmitUserDm(params);
+  }
+  /**
+   * Sends `clawith.user_dm` and resolves after `clawith.user_dm_ok`, or rejects on `user_dm_failed` / timeout.
+   */
+  sendUserDmAwaitAck(params, timeoutMs = DEFAULT_LONGLINK_ACK_TIMEOUT_MS) {
+    const uid = params.targetUserId.trim().toLowerCase();
+    const cid = (params.conversationId ?? "").trim().toLowerCase();
+    return new Promise((resolve, reject) => {
+      let holder;
+      const timer = setTimeout(() => {
+        const i = this.userDmAckWaiters.indexOf(holder);
+        if (i >= 0) this.userDmAckWaiters.splice(i, 1);
+        reject(new Error(`xcclawith_user_dm_ack_timeout ${timeoutMs}ms`));
+      }, timeoutMs);
+      holder = {
+        targetUserId: uid,
+        conversationId: cid,
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+        timer
+      };
+      this.userDmAckWaiters.push(holder);
+      this.transmitUserDm(params);
+    });
+  }
+  transmitPeerMessage(params) {
     this.log.info(
       xcLine("longlink.tx", "sendPeerMessage.build", {
         target_agent_id: params.targetAgentId,
@@ -14692,6 +14948,37 @@ var LonglinkHub = class {
     if (params.conversationId) body.conversation_id = params.conversationId;
     if (params.newSessionId) body.new_session_id = params.newSessionId;
     this.send(body);
+  }
+  sendPeerMessage(params) {
+    this.transmitPeerMessage(params);
+  }
+  /**
+   * Sends `clawith.peer_message` and resolves after `peer_message_ok`, or rejects on failed / timeout.
+   */
+  sendPeerMessageAwaitAck(params, timeoutMs = DEFAULT_LONGLINK_ACK_TIMEOUT_MS) {
+    const aid = params.targetAgentId.trim().toLowerCase();
+    return new Promise((resolve, reject) => {
+      let holder;
+      const timer = setTimeout(() => {
+        const i = this.peerAckWaiters.indexOf(holder);
+        if (i >= 0) this.peerAckWaiters.splice(i, 1);
+        reject(new Error(`xcclawith_peer_ack_timeout ${timeoutMs}ms`));
+      }, timeoutMs);
+      holder = {
+        targetAgentId: aid,
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+        timer
+      };
+      this.peerAckWaiters.push(holder);
+      this.transmitPeerMessage(params);
+    });
   }
 };
 function scrubUrl(u) {
@@ -14787,66 +15074,6 @@ async function ensureXcclawithLonglinkHub(params) {
     throw e instanceof Error ? e : new Error(String(e));
   }
   return hub;
-}
-
-// src/clawith-target.ts
-var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-function isClawithUserIdShape(s) {
-  return UUID.test(s);
-}
-function assertStrictClawithUserDmTarget(raw) {
-  let s = (raw ?? "").trim();
-  if (!s) {
-    xcConsole("warn", "target", "assertUserDm.reject", { reason: "empty_to", raw: raw ?? null });
-    throw new Error(
-      "xcclawith_empty_target \u2014 message `to` is required: Clawith users.id as UUID or user:<uuid> from xcclawith_directory (kind=user)."
-    );
-  }
-  const hadUserPrefix = s.toLowerCase().startsWith("user:");
-  if (hadUserPrefix) s = s.slice(5).trim();
-  if (!s) {
-    xcConsole("warn", "target", "assertUserDm.reject", { reason: "empty_after_user_prefix", raw });
-    throw new Error("xcclawith_empty_target_after_user_prefix");
-  }
-  const lower = s.toLowerCase();
-  if (!isClawithUserIdShape(lower)) {
-    xcConsole("warn", "target", "assertUserDm.reject", {
-      reason: "not_rfc4122_uuid",
-      raw,
-      hadUserPrefix,
-      afterStrip: s
-    });
-    throw new Error(
-      `xcclawith_to_must_be_users_id to=${JSON.stringify(raw)} \u2014 pass only bare users.id UUID or user:<uuid> from tool xcclawith_directory (kind=user, field id). Display names, @handles, and emails are not accepted. For another OpenClaw use xcclawith_peer_message with target_agent_id (agents.id from kind=openclaw).`
-    );
-  }
-  xcConsole("info", "target", "assertUserDm.ok", { userId: lower, hadUserPrefix });
-  return lower;
-}
-function assertStrictClawithAgentId(raw) {
-  let s = (raw ?? "").trim();
-  if (!s) {
-    xcConsole("warn", "target", "assertAgentId.reject", { reason: "empty", raw: raw ?? null });
-    throw new Error(
-      "xcclawith_empty_target_agent_id \u2014 xcclawith_peer_message.target_agent_id is required (UUID from xcclawith_directory kind=openclaw)."
-    );
-  }
-  const hadAgentPrefix = s.toLowerCase().startsWith("agent:");
-  if (hadAgentPrefix) s = s.slice(6).trim();
-  const lower = s.toLowerCase();
-  if (!isClawithUserIdShape(lower)) {
-    xcConsole("warn", "target", "assertAgentId.reject", {
-      reason: "not_uuid",
-      raw,
-      hadAgentPrefix,
-      afterStrip: s
-    });
-    throw new Error(
-      `xcclawith_target_agent_id_must_be_uuid got=${JSON.stringify(raw)} \u2014 use xcclawith_directory, take kind=openclaw row id as target_agent_id.`
-    );
-  }
-  xcConsole("info", "target", "assertAgentId.ok", { agentId: lower, hadAgentPrefix });
-  return lower;
 }
 
 // src/session-keys.ts
@@ -15008,10 +15235,14 @@ var chatPlugin = createChatChannelPlugin({
             `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`
           );
         }
-        xcConsole("info", "outbound.sendText", "step4.assert_to", {
-          note: "must be users.id UUID or user:<uuid>"
+        xcConsole("info", "outbound.sendText", "step4.resolve_to", {
+          note: "UUID or user:<uuid> fast path; else GET /api/gateway/directory q=needle (\u4E2D\u6587/\u62FC\u97F3/@\u6635\u79F0\u7B49)"
         });
-        const targetUserId = assertStrictClawithUserDmTarget(params.to);
+        const effSection = resolveEffectiveSection(sectionParsed.data);
+        const targetUserId = await resolveOutboundTargetToUserId({
+          rawTo: params.to,
+          section: effSection
+        });
         const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
         const existing = memory.getUserConversation(targetUserId);
         const conversationId = fromThread ?? existing ?? crypto.randomUUID();
@@ -15031,21 +15262,23 @@ var chatPlugin = createChatChannelPlugin({
         }
         memory.setUserConversation(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
-        xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm", {
-          note: "async ack: clawith.user_dm_ok or user_dm_failed on wire"
+        xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm_await_ack", {
+          note: "throws if user_dm_failed or ack timeout"
         });
-        hub.sendUserDm({
+        const ack = await hub.sendUserDmAwaitAck({
           targetUserId,
           content: params.text,
           conversationId
         });
+        const finalConv = ack.conversationId.trim();
+        memory.setUserConversation(targetUserId, finalConv);
         const messageId = `xcclawith-dm-${Date.now()}`;
         xcConsole("info", "outbound.sendText", "step8.return_to_openclaw", {
           messageId,
-          conversationId,
-          meaning: "OpenClaw may show success before Clawith ack arrives"
+          conversationId: finalConv,
+          meaning: "Clawith returned user_dm_ok"
         });
-        return { channel: CHANNEL_ID, messageId, conversationId };
+        return { channel: CHANNEL_ID, messageId, conversationId: finalConv };
       }
     }
   }
@@ -15055,17 +15288,21 @@ var xcclawithChannelPlugin = {
   messaging: {
     targetResolver: {
       looksLikeId: (_raw, normalized) => {
-        let s = (normalized ?? _raw).trim();
-        if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
-        return isClawithUserIdShape(s.toLowerCase());
+        const s = (normalized ?? _raw).trim();
+        if (!s) return false;
+        let x = s;
+        if (x.toLowerCase().startsWith("user:")) x = x.slice(5).trim();
+        if (x && isClawithUserIdShape(x.toLowerCase())) return true;
+        return s.length > 0;
       },
-      hint: "Clawith: message `to` must be user:<uuid> or bare users.id only (from xcclawith_directory). threadId: conversation UUID or clawith-<uuid>. Peer bots: xcclawith_peer_message + agents.id UUID."
+      hint: "Clawith: `to` = user:<uuid>, bare users.id, or \u4E2D\u6587/\u62FC\u97F3/@\u6635\u79F0/email (directory). User message success only after Clawith user_dm_ok. Peer: xcclawith_directory shows kind=openclaw online; offline peers must not use xcclawith_peer_message."
     }
   },
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith \u2014 Before ANY user DM: call tool xcclawith_directory (GET /api/gateway/directory) with q or omit q to list; copy kind=user \u2192 id, then message with to=user:<id> or bare UUID. Names, @handles, emails are NOT accepted in `to` \u2014 the channel does not resolve them.",
-      "Clawith / xcclawith: To reach another OpenClaw: xcclawith_directory (kind=openclaw) \u2192 xcclawith_peer_message with target_agent_id = that row's id (UUID only).",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
+      "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message \u2014 it will be blocked. kind=user has no online requirement.",
+      "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) \u2192 xcclawith_peer_message; success only after peer_message_ok.",
       "Clawith / xcclawith: Session peer id is clawith-<conversation_id>. Reuse a thread via message tool threadId = that UUID (or clawith-<uuid>)."
     ]
   },
@@ -15210,12 +15447,20 @@ ${chunk}` : chunk;
               chunkLen: chunk.length,
               accumulatedLen: accumulated.length
             });
-            hub.sendUserDm({
-              targetUserId: userId,
-              content: chunk,
-              conversationId,
-              messageId: eventId
-            });
+            try {
+              await hub.sendUserDmAwaitAck({
+                targetUserId: userId,
+                content: chunk,
+                conversationId,
+                messageId: eventId
+              });
+            } catch (e) {
+              xcBoth(sink, "error", "gateway.deliver", "user_dm_ack_failed", {
+                eventId,
+                userId,
+                err: String(e)
+              });
+            }
           },
           onRecordError: (err) => {
             xcBoth(sink, "error", "gateway.dispatch", "record_inbound_session_error", {
@@ -17891,6 +18136,48 @@ __export(type_exports2, {
 // node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
 var Type = type_exports2;
 
+// src/directory-peer-online.ts
+function findOpenclawRow(items, agentId) {
+  const idl = agentId.trim().toLowerCase();
+  return items.find((i) => i.kind === "openclaw" && i.id.trim().toLowerCase() === idl);
+}
+async function assertPeerAgentOnlineOrThrow(params) {
+  const aid = params.agentId.trim();
+  let items = (await fetchGatewayDirectory({
+    section: params.section,
+    q: aid,
+    limit: 50
+  })).items;
+  let row = findOpenclawRow(items, aid);
+  if (!row) {
+    items = (await fetchGatewayDirectory({
+      section: params.section,
+      limit: 50
+    })).items;
+    row = findOpenclawRow(items, aid);
+  }
+  if (!row) {
+    xcConsole("warn", "directory.peer", "openclaw_row_not_found", {
+      agentId: aid,
+      meaning: "cannot verify online; proceeding with peer send"
+    });
+    return;
+  }
+  if (row.online === false) {
+    xcConsole("warn", "directory.peer", "peer_offline_blocked", {
+      agentId: aid,
+      display_name: row.display_name
+    });
+    throw new Error(
+      `xcclawith_peer_offline: directory reports online=false for agents.id=${aid} (${row.display_name}). Wait until the peer OpenClaw is online before xcclawith_peer_message.`
+    );
+  }
+  xcConsole("info", "directory.peer", "peer_online_ok", {
+    agentId: aid,
+    online: row.online ?? null
+  });
+}
+
 // src/tools.ts
 import { normalizeAccountId as normalizeAccountId2 } from "openclaw/plugin-sdk/routing";
 function readEffectiveSection(api) {
@@ -17912,7 +18199,7 @@ function registerXcclawithTools(api) {
   const directoryTool = {
     name: "xcclawith_directory",
     label: "Clawith directory",
-    description: "MANDATORY before sending to a human or peer bot: calls GET /api/gateway/directory. The message tool does NOT accept names \u2014 you must copy ids from here. q is optional fuzzy search (display_name/username/email); omit q to list visible rows up to limit (default 20, max 50). kind=user \u2192 field id is users.id: use as message `to` as user:<id> or bare UUID. kind=openclaw \u2192 field id is agents.id: use xcclawith_peer_message.target_agent_id only (UUID).",
+    description: "Calls GET /api/gateway/directory. Each row may include `online` (kind=openclaw only): false means peer bot is offline \u2014 do not xcclawith_peer_message. kind=user has no online field / requirement. The channel also resolves non-UUID message `to` via this API. q optional; omit q to list visible rows (default 20, max 50). kind=user \u2192 users.id for DMs; kind=openclaw \u2192 agents.id for xcclawith_peer_message.",
     parameters: Type.Object({
       q: Type.Optional(
         Type.String({
@@ -17946,7 +18233,8 @@ function registerXcclawithTools(api) {
         kind: it.kind,
         id: it.id,
         display_name: it.display_name,
-        username: it.username
+        username: it.username,
+        online: it.kind === "openclaw" ? it.online ?? null : void 0
       }));
       xcConsole("info", "tools.directory", "execute.rows", {
         toolCallId,
@@ -17964,7 +18252,7 @@ function registerXcclawithTools(api) {
         });
         text += "\n\nNo rows: broaden q, try username/pinyin, or omit q to list visible contacts (check Clawith visibility rules).";
       } else {
-        text += "\n\nUse kind=user id as message `to` (user:<uuid> or bare UUID). Use kind=openclaw id only with xcclawith_peer_message.target_agent_id.";
+        text += "\n\nFor kind=openclaw check `online`: false = peer offline, do not send xcclawith_peer_message. kind=user: use id as message `to` (user:<uuid> or bare UUID). User DM and peer send only return success after Clawith longlink ack (user_dm_ok / peer_message_ok).";
       }
       xcConsole("info", "tools.directory", "execute.done", { toolCallId, rowCount: lines.length });
       return {
@@ -17976,7 +18264,7 @@ function registerXcclawithTools(api) {
   const peerTool = {
     name: "xcclawith_peer_message",
     label: "Clawith peer OpenClaw message",
-    description: "Send to another OpenClaw via longlink (clawith.peer_message). target_agent_id MUST be agents.id UUID from xcclawith_directory (kind=openclaw). No names.",
+    description: "Send to another OpenClaw via longlink (clawith.peer_message). target_agent_id = agents.id (kind=openclaw). Plugin checks directory: if online=false, send is rejected. Success only after peer_message_ok.",
     parameters: Type.Object({
       target_agent_id: Type.String({
         description: "agents.id UUID from xcclawith_directory (kind=openclaw). Bare UUID only."
@@ -18046,6 +18334,20 @@ function registerXcclawithTools(api) {
       api.logger.info?.(
         `[xcclawith] tool=xcclawith_peer_message send target_agent_id=${agentId} requires_reply=${params.requires_reply ?? false} content_len=${params.content.length}`
       );
+      const section = readEffectiveSection(api);
+      try {
+        await assertPeerAgentOnlineOrThrow({ section, agentId });
+      } catch (e) {
+        const msg = String(e);
+        if (msg.includes("xcclawith_peer_offline")) {
+          xcConsole("warn", "tools.peer", "blocked_offline", { toolCallId, agentId });
+          return {
+            content: [{ type: "text", text: msg }],
+            details: { status: "rejected", reason: "offline" }
+          };
+        }
+        throw e;
+      }
       const conv = params.conversation_id ?? memory.getPeerConversation(agentId) ?? void 0;
       let newSession = params.new_session_id ?? memory.getPeerNewSession(agentId);
       xcConsole("info", "tools.peer", "routing_state", {
@@ -18065,23 +18367,40 @@ function registerXcclawithTools(api) {
         conversationId: conv ?? null,
         newSessionId: newSession ?? null
       });
-      hub.sendPeerMessage({
-        targetAgentId: agentId,
-        content: params.content,
-        requiresReply: params.requires_reply ?? false,
-        conversationId: conv,
-        newSessionId: newSession
-      });
-      xcConsole("info", "tools.peer", "execute.queued", { toolCallId, agentId });
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Peer message sent on longlink (await clawith.peer_message_ok / failed on the wire)."
+      try {
+        const ack = await hub.sendPeerMessageAwaitAck({
+          targetAgentId: agentId,
+          content: params.content,
+          requiresReply: params.requires_reply ?? false,
+          conversationId: conv,
+          newSessionId: newSession
+        });
+        xcConsole("info", "tools.peer", "execute.ok", {
+          toolCallId,
+          agentId,
+          conversationId: ack.conversationId
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Peer message delivered (peer_message_ok). conversation_id=${ack.conversationId}`
+            }
+          ],
+          details: {
+            status: "ok",
+            target_agent_id: agentId,
+            conversation_id: ack.conversationId
           }
-        ],
-        details: { status: "queued", target_agent_id: agentId }
-      };
+        };
+      } catch (e) {
+        const msg = String(e);
+        xcConsole("error", "tools.peer", "execute.ack_failed", { toolCallId, agentId, err: msg });
+        return {
+          content: [{ type: "text", text: `Peer message failed: ${msg}` }],
+          details: { status: "failed", target_agent_id: agentId }
+        };
+      }
     }
   };
   api.registerTool(directoryTool);

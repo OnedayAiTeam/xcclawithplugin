@@ -16,10 +16,11 @@ import {
   formatGatewayTaskDiagnostics,
 } from "./gateway-payload.js";
 import { fetchGatewayDirectory } from "./directory-api.js";
+import { resolveOutboundTargetToUserId } from "./directory-resolve.js";
 import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
 import { getMemory, removeHub, setHub } from "./hub-registry.js";
 import { LonglinkHub } from "./longlink-hub.js";
-import { assertStrictClawithUserDmTarget, isClawithUserIdShape } from "./clawith-target.js";
+import { isClawithUserIdShape } from "./clawith-target.js";
 import { resolveEffectiveSection, xcclawithSectionSchema, channelConfigSchema } from "./schema.js";
 import type { XcclawithSection } from "./schema.js";
 import {
@@ -171,10 +172,14 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
             `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`,
           );
         }
-        xcConsole("info", "outbound.sendText", "step4.assert_to", {
-          note: "must be users.id UUID or user:<uuid>",
+        xcConsole("info", "outbound.sendText", "step4.resolve_to", {
+          note: "UUID or user:<uuid> fast path; else GET /api/gateway/directory q=needle (中文/拼音/@昵称等)",
         });
-        const targetUserId = assertStrictClawithUserDmTarget(params.to);
+        const effSection = resolveEffectiveSection(sectionParsed.data);
+        const targetUserId = await resolveOutboundTargetToUserId({
+          rawTo: params.to,
+          section: effSection,
+        });
         const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
         const existing = memory.getUserConversation(targetUserId);
         const conversationId = fromThread ?? existing ?? crypto.randomUUID();
@@ -194,21 +199,23 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
         }
         memory.setUserConversation(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
-        xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm", {
-          note: "async ack: clawith.user_dm_ok or user_dm_failed on wire",
+        xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm_await_ack", {
+          note: "throws if user_dm_failed or ack timeout",
         });
-        hub.sendUserDm({
+        const ack = await hub.sendUserDmAwaitAck({
           targetUserId,
           content: params.text,
           conversationId,
         });
+        const finalConv = ack.conversationId.trim();
+        memory.setUserConversation(targetUserId, finalConv);
         const messageId = `xcclawith-dm-${Date.now()}`;
         xcConsole("info", "outbound.sendText", "step8.return_to_openclaw", {
           messageId,
-          conversationId,
-          meaning: "OpenClaw may show success before Clawith ack arrives",
+          conversationId: finalConv,
+          meaning: "Clawith returned user_dm_ok",
         });
-        return { channel: CHANNEL_ID, messageId, conversationId };
+        return { channel: CHANNEL_ID, messageId, conversationId: finalConv };
       },
     },
   },
@@ -219,17 +226,21 @@ export const xcclawithChannelPlugin = {
   messaging: {
     targetResolver: {
       looksLikeId: (_raw: string, normalized?: string) => {
-        let s = (normalized ?? _raw).trim();
-        if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
-        return isClawithUserIdShape(s.toLowerCase());
+        const s = (normalized ?? _raw).trim();
+        if (!s) return false;
+        let x = s;
+        if (x.toLowerCase().startsWith("user:")) x = x.slice(5).trim();
+        if (x && isClawithUserIdShape(x.toLowerCase())) return true;
+        return s.length > 0;
       },
-      hint: "Clawith: message `to` must be user:<uuid> or bare users.id only (from xcclawith_directory). threadId: conversation UUID or clawith-<uuid>. Peer bots: xcclawith_peer_message + agents.id UUID.",
+      hint: "Clawith: `to` = user:<uuid>, bare users.id, or 中文/拼音/@昵称/email (directory). User message success only after Clawith user_dm_ok. Peer: xcclawith_directory shows kind=openclaw online; offline peers must not use xcclawith_peer_message.",
     },
   },
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith — Before ANY user DM: call tool xcclawith_directory (GET /api/gateway/directory) with q or omit q to list; copy kind=user → id, then message with to=user:<id> or bare UUID. Names, @handles, emails are NOT accepted in `to` — the channel does not resolve them.",
-      "Clawith / xcclawith: To reach another OpenClaw: xcclawith_directory (kind=openclaw) → xcclawith_peer_message with target_agent_id = that row's id (UUID only).",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or 中文 / 拼音 / @昵称 / email — non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
+      "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message — it will be blocked. kind=user has no online requirement.",
+      "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) → xcclawith_peer_message; success only after peer_message_ok.",
       "Clawith / xcclawith: Session peer id is clawith-<conversation_id>. Reuse a thread via message tool threadId = that UUID (or clawith-<uuid>).",
     ],
   },
@@ -390,12 +401,20 @@ export const xcclawithChannelPlugin = {
               chunkLen: chunk.length,
               accumulatedLen: accumulated.length,
             });
-            hub.sendUserDm({
-              targetUserId: userId,
-              content: chunk,
-              conversationId,
-              messageId: eventId,
-            });
+            try {
+              await hub.sendUserDmAwaitAck({
+                targetUserId: userId,
+                content: chunk,
+                conversationId,
+                messageId: eventId,
+              });
+            } catch (e) {
+              xcBoth(sink, "error", "gateway.deliver", "user_dm_ack_failed", {
+                eventId,
+                userId,
+                err: String(e),
+              });
+            }
           },
           onRecordError: (err) => {
             xcBoth(sink, "error", "gateway.dispatch", "record_inbound_session_error", {

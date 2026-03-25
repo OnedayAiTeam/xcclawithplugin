@@ -9,6 +9,8 @@ export type DirectoryItem = {
   username?: string | null;
   email?: string | null;
   creator_user_id?: string | null;
+  /** `kind=openclaw` only: whether the peer bot has longlink connected. Absent/unknown = not checked server-side. */
+  online?: boolean | null;
 };
 
 export type DirectoryResponse = {

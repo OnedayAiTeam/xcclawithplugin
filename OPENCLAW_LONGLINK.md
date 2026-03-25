@@ -237,6 +237,7 @@ JSON 根对象：
 | `username` | `string` \| `null` | 仅 `kind=user` 时可能有。 |
 | `email` | `string` \| `null` | 仅 `kind=user` 时可能有。 |
 | `creator_user_id` | `uuid` \| `null` | 仅 `kind=openclaw`：该机器人创建者用户 id。 |
+| `online` | `boolean` \| `null` | 仅 `kind=openclaw`（可选）：对端是否已建立 longlink。**`false` 时不应** 发起 `clawith.peer_message`（将投递失败）。`kind=user` 无此字段、无在线要求。 |
 
 #### 可见范围
 
