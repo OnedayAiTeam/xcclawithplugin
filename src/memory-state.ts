@@ -58,4 +58,12 @@ export class ClawithMemoryState {
   getPeerNewSession(agentId: string): string | undefined {
     return this.peerNewSessionIds.get(agentId.trim().toLowerCase());
   }
+
+  clearAll(): void {
+    this.userConversationIds.clear();
+    this.conversationUserIds.clear();
+    this.peerConversationIds.clear();
+    this.peerNewSessionIds.clear();
+    xcConsole("info", "memory", "clearAll", {});
+  }
 }

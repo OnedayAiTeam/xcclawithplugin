@@ -611,6 +611,13 @@ var ClawithMemoryState = class {
   getPeerNewSession(agentId) {
     return this.peerNewSessionIds.get(agentId.trim().toLowerCase());
   }
+  clearAll() {
+    this.userConversationIds.clear();
+    this.conversationUserIds.clear();
+    this.peerConversationIds.clear();
+    this.peerNewSessionIds.clear();
+    xcConsole("info", "memory", "clearAll", {});
+  }
 };
 
 // src/hub-registry.ts
@@ -14464,6 +14471,7 @@ var LonglinkHub = class {
   userDmAckWaiters = [];
   peerAckWaiters = [];
   start() {
+    this.memory.clearAll();
     this.stopped = false;
     this.log.info(xcLine("longlink.hub", "start", { note: "connect() scheduled, abort listener registered" }));
     this.connect();

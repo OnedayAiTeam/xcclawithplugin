@@ -68,6 +68,7 @@ export class LonglinkHub {
   }
 
   start(): void {
+    this.memory.clearAll();
     this.stopped = false;
     this.log.info(xcLine("longlink.hub", "start", { note: "connect() scheduled, abort listener registered" }));
     this.connect();
