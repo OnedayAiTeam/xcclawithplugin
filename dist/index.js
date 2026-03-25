@@ -233,6 +233,71 @@ async function fetchGatewayDirectory(params) {
   return { items };
 }
 
+// src/clawith-target.ts
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_GLOBAL = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
+function normalizeClawithTargetUserId(raw) {
+  let s = raw.trim();
+  if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
+  const hits = s.match(UUID_GLOBAL);
+  if (!hits?.length) return s;
+  if (hits.length === 1) return hits[0].toLowerCase();
+  return hits[hits.length - 1].toLowerCase();
+}
+function isClawithUserIdShape(s) {
+  return UUID.test(s);
+}
+
+// src/directory-resolve.ts
+function stripAtHandle(s) {
+  return s.trim().replace(/^@+/, "").trim();
+}
+function exactMatchUserRow(item, needleRaw) {
+  if (item.kind !== "user") return false;
+  const needle = needleRaw.trim().toLowerCase();
+  if (!needle) return false;
+  const u = (item.username ?? "").trim().toLowerCase();
+  if (u === needle) return true;
+  const eFull = (item.email ?? "").trim().toLowerCase();
+  if (eFull === needle) return true;
+  if (!needle.includes("@") && eFull.includes("@")) {
+    const local = eFull.split("@")[0] ?? "";
+    if (local === needle) return true;
+  }
+  const d = (item.display_name ?? "").trim().toLowerCase();
+  if (d === needle) return true;
+  return false;
+}
+function pickExactUsers(items, needle) {
+  return items.filter((i) => exactMatchUserRow(i, needle));
+}
+async function resolveOutboundTargetToUserId(params) {
+  const normalized = normalizeClawithTargetUserId(params.rawTo);
+  if (isClawithUserIdShape(normalized)) return normalized;
+  const needle = stripAtHandle(params.rawTo);
+  if (!needle) {
+    throw new Error("xcclawith_empty_target");
+  }
+  const { items } = await fetchGatewayDirectory({
+    section: params.section,
+    q: needle,
+    limit: 500,
+    log: params.log
+  });
+  const matches = pickExactUsers(items, needle);
+  if (matches.length === 1) {
+    return matches[0].id;
+  }
+  if (matches.length === 0) {
+    throw new Error(
+      `xcclawith_no_exact_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} \u2014 no kind=user row with exact username/email/display_name in directory results; use xcclawith_directory or user:<uuid>.`
+    );
+  }
+  throw new Error(
+    `xcclawith_ambiguous_directory_match to=${JSON.stringify(params.rawTo)} count=${matches.length} \u2014 use user:<uuid>.`
+  );
+}
+
 // src/memory-state.ts
 var ClawithMemoryState = class {
   /** Clawith user id -> web DM conversation_id */
@@ -14364,11 +14429,6 @@ function cfgWithXcclawithDmScopeDefault(cfg) {
 function readSectionRaw2(cfg) {
   return cfg.channels?.[CHANNEL_ID];
 }
-function clawithDmPeerId(to) {
-  const t = to.trim();
-  if (t.toLowerCase().startsWith("user:")) return t.slice(5).trim();
-  return t;
-}
 function untilAbort(signal) {
   return new Promise((resolve) => {
     if (signal.aborted) resolve();
@@ -14463,7 +14523,16 @@ var chatPlugin = createChatChannelPlugin({
           connectTimeoutMs: 25e3
         });
         const memory = getMemory(accountId);
-        const peerId = clawithDmPeerId(params.to);
+        const sectionParsed = xcclawithSectionSchema.safeParse(readSectionRaw2(params.cfg));
+        if (!sectionParsed.success) {
+          throw new Error(
+            `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`
+          );
+        }
+        const peerId = await resolveOutboundTargetToUserId({
+          rawTo: params.to,
+          section: resolveEffectiveSection(sectionParsed.data)
+        });
         const existing = memory.getUserConversation(peerId);
         const conversationId = existing ?? crypto.randomUUID();
         if (!existing) {
@@ -14483,8 +14552,8 @@ var xcclawithChannelPlugin = {
   ...chatPlugin,
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: You cannot resolve people by display name alone. Before sending a user DM, call xcclawith_directory with q=name fragment, username, pinyin, or email part; use the returned kind=user id (UUID) as the message target.",
-      "Clawith / xcclawith: To browse visible contacts, call xcclawith_directory with no q (or empty q) and limit 20\u201350; then pick the correct id.",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / username / email / display_name \u2014 the plugin calls GET /api/gateway/directory and requires an exact match (case-insensitive) on username, email, or display_name among visible users.",
+      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory to disambiguate or pass user:<uuid>.",
       "Clawith / xcclawith: For other OpenClaw bots use xcclawith_peer_message with target_agent_id from directory rows where kind is openclaw (shown as channel in some UIs)."
     ]
   },

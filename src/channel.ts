@@ -15,6 +15,7 @@ import {
   extractTaskUserIdFromPayload,
 } from "./gateway-payload.js";
 import { fetchGatewayDirectory } from "./directory-api.js";
+import { resolveOutboundTargetToUserId } from "./directory-resolve.js";
 import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
 import { getMemory, removeHub, setHub } from "./hub-registry.js";
 import { LonglinkHub } from "./longlink-hub.js";
@@ -45,13 +46,6 @@ function cfgWithXcclawithDmScopeDefault(cfg: OpenClawConfig): OpenClawConfig {
 
 function readSectionRaw(cfg: OpenClawConfig): unknown {
   return (cfg.channels as Record<string, unknown> | undefined)?.[CHANNEL_ID];
-}
-
-/** OpenClaw may pass `user:<uuid>`; Clawith `target_user_id` expects the bare users.id UUID. */
-function clawithDmPeerId(to: string): string {
-  const t = to.trim();
-  if (t.toLowerCase().startsWith("user:")) return t.slice(5).trim();
-  return t;
 }
 
 /** OpenClaw keeps the `startAccount` promise open until the channel stops; resolving too early triggers gateway auto-restart. */
@@ -154,7 +148,16 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
           connectTimeoutMs: 25_000,
         });
         const memory = getMemory(accountId);
-        const peerId = clawithDmPeerId(params.to);
+        const sectionParsed = xcclawithSectionSchema.safeParse(readSectionRaw(params.cfg));
+        if (!sectionParsed.success) {
+          throw new Error(
+            `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`,
+          );
+        }
+        const peerId = await resolveOutboundTargetToUserId({
+          rawTo: params.to,
+          section: resolveEffectiveSection(sectionParsed.data),
+        });
         const existing = memory.getUserConversation(peerId);
         const conversationId = existing ?? crypto.randomUUID();
         if (!existing) {
@@ -175,8 +178,8 @@ export const xcclawithChannelPlugin = {
   ...chatPlugin,
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: You cannot resolve people by display name alone. Before sending a user DM, call xcclawith_directory with q=name fragment, username, pinyin, or email part; use the returned kind=user id (UUID) as the message target.",
-      "Clawith / xcclawith: To browse visible contacts, call xcclawith_directory with no q (or empty q) and limit 20–50; then pick the correct id.",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / username / email / display_name — the plugin calls GET /api/gateway/directory and requires an exact match (case-insensitive) on username, email, or display_name among visible users.",
+      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory to disambiguate or pass user:<uuid>.",
       "Clawith / xcclawith: For other OpenClaw bots use xcclawith_peer_message with target_agent_id from directory rows where kind is openclaw (shown as channel in some UIs).",
     ],
   },
