@@ -14572,9 +14572,10 @@ ${chunk}` : chunk;
             sink.error(`xcclawith.dispatch_error kind=${info.kind} ${String(err)}`);
           }
         });
+        const sentViaUserDm = accumulated.trim().length > 0;
         hub.sendReport({
           messageId: eventId,
-          result: accumulated.trim() || " ",
+          result: sentViaUserDm ? "" : " ",
           requiresReply
         });
       }, ctx.abortSignal);

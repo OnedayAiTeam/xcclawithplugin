@@ -279,9 +279,11 @@ export const xcclawithChannelPlugin = {
           },
         });
 
+        // Task must still `report` to close; body already went in `clawith.user_dm` — non-empty `result` duplicates web UI.
+        const sentViaUserDm = accumulated.trim().length > 0;
         hub.sendReport({
           messageId: eventId,
-          result: accumulated.trim() || " ",
+          result: sentViaUserDm ? "" : " ",
           requiresReply,
         });
       }, ctx.abortSignal);
