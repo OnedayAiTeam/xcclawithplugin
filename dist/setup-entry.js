@@ -24,6 +24,13 @@ var DEFAULT_LONGLINK_PORT = 38438;
 var DEFAULT_LONGLINK_USER_ID = "agent0323";
 
 // src/gateway-payload.ts
+function pickString(obj, keys) {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return void 0;
+}
 function extractTaskText(message) {
   if (message === null || message === void 0) return "";
   if (typeof message === "string") return message;
@@ -42,18 +49,105 @@ function extractTaskText(message) {
 function extractTaskUserId(message) {
   if (!message || typeof message !== "object") return void 0;
   const m = message;
-  const directKeys = ["user_id", "userId", "sender_id", "senderId", "from_user_id", "fromUserId"];
-  for (const k of directKeys) {
-    const v = m[k];
-    if (typeof v === "string" && v) return v;
-  }
-  const nested = m.user ?? m.sender;
+  const direct = pickString(m, [
+    "user_id",
+    "userId",
+    "sender_id",
+    "senderId",
+    "from_user_id",
+    "fromUserId",
+    "sender_user_id",
+    "senderUserId",
+    "author_id",
+    "authorId",
+    "from_id",
+    "fromId",
+    "participant_id",
+    "participantId",
+    "creator_id",
+    "creatorId"
+  ]);
+  if (direct) return direct;
+  const nested = m.user ?? m.sender ?? m.author ?? m.from ?? m.participant ?? m.contact;
   if (nested && typeof nested === "object") {
     const u = nested;
-    const id = u.id;
-    if (typeof id === "string" && id) return id;
+    const id = pickString(u, ["id", "user_id", "userId"]);
+    if (id) return id;
+  }
+  for (const wrap of [m.meta, m.metadata, m.attributes, m.data]) {
+    if (wrap && typeof wrap === "object") {
+      const id = pickString(wrap, [
+        "user_id",
+        "userId",
+        "sender_id",
+        "senderId",
+        "from_user_id",
+        "fromUserId"
+      ]);
+      if (id) return id;
+    }
   }
   return void 0;
+}
+function extractTaskUserIdFromPayload(payload) {
+  const fromMessage = extractTaskUserId(payload.message);
+  if (fromMessage) return fromMessage;
+  const rel = payload.relationships;
+  if (Array.isArray(rel)) {
+    const rows = rel.filter((item) => Boolean(item && typeof item === "object"));
+    const kindOf = (o) => String(o.kind ?? o.type ?? o.role ?? "").toLowerCase();
+    for (const o of rows) {
+      const k = kindOf(o);
+      if (k !== "user" && k !== "users" && !k.endsWith("user")) continue;
+      const id = pickString(o, ["id", "user_id", "userId", "uuid"]);
+      if (id) return id;
+      const nested = extractTaskUserId(o);
+      if (nested) return nested;
+    }
+    for (const o of rows) {
+      const id = pickString(o, ["id", "user_id", "userId", "uuid"]);
+      if (id) return id;
+      const nested = extractTaskUserId(o);
+      if (nested) return nested;
+    }
+  }
+  if (rel && typeof rel === "object" && !Array.isArray(rel)) {
+    const r = rel;
+    const single = r.user ?? r.sender ?? r.contact ?? r.participant ?? r.customer;
+    if (single && typeof single === "object") {
+      const id = pickString(single, ["id", "user_id", "userId"]);
+      if (id) return id;
+    }
+    for (const v of Object.values(r)) {
+      if (!Array.isArray(v)) continue;
+      for (const item of v) {
+        const id = extractTaskUserId(item);
+        if (id) return id;
+      }
+    }
+    const data = r.data;
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        if (!item || typeof item !== "object") continue;
+        const o = item;
+        const t = o.type;
+        const id = pickString(o, ["id"]);
+        if (id && (t === void 0 || String(t).toLowerCase().includes("user"))) return id;
+      }
+    } else if (data && typeof data === "object") {
+      const o = data;
+      const id = pickString(o, ["id", "user_id", "userId"]);
+      if (id) return id;
+    }
+  }
+  return pickString(payload, [
+    "user_id",
+    "userId",
+    "sender_user_id",
+    "senderUserId",
+    "from_user_id",
+    "fromUserId"
+  ]);
 }
 function extractConversationId(message) {
   if (!message || typeof message !== "object") return void 0;
@@ -14423,11 +14517,13 @@ var xcclawithChannelPlugin = {
       }
       const rt = ctx.channelRuntime;
       const hub = new LonglinkHub(section, memory, sink, async ({ eventId, payload }) => {
-        const msg = payload.message;
-        const userId = extractTaskUserId(msg);
+        const p = payload && typeof payload === "object" ? payload : {};
+        const msg = p.message;
+        const userId = extractTaskUserIdFromPayload(p);
         if (!userId) {
+          const messageKeys = msg && typeof msg === "object" && !Array.isArray(msg) ? Object.keys(msg).join(",") : typeof msg;
           sink.warn(
-            `xcclawith.task_missing_user eventId=${eventId} payloadKeys=${Object.keys(payload).join(",")}`
+            `xcclawith.task_missing_user eventId=${eventId} payloadKeys=${Object.keys(p).join(",")} messageKeys=${messageKeys}`
           );
           return;
         }

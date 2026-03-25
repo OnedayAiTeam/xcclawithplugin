@@ -12,7 +12,7 @@ import {
   extractConversationId,
   extractRequiresReply,
   extractTaskText,
-  extractTaskUserId,
+  extractTaskUserIdFromPayload,
 } from "./gateway-payload.js";
 import { fetchGatewayDirectory } from "./directory-api.js";
 import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
@@ -214,11 +214,19 @@ export const xcclawithChannelPlugin = {
       const rt = ctx.channelRuntime;
 
       const hub = new LonglinkHub(section, memory, sink, async ({ eventId, payload }) => {
-        const msg = payload.message;
-        const userId = extractTaskUserId(msg);
+        const p =
+          payload && typeof payload === "object"
+            ? (payload as Record<string, unknown>)
+            : ({} as Record<string, unknown>);
+        const msg = p.message;
+        const userId = extractTaskUserIdFromPayload(p);
         if (!userId) {
+          const messageKeys =
+            msg && typeof msg === "object" && !Array.isArray(msg)
+              ? Object.keys(msg as Record<string, unknown>).join(",")
+              : typeof msg;
           sink.warn(
-            `xcclawith.task_missing_user eventId=${eventId} payloadKeys=${Object.keys(payload).join(",")}`,
+            `xcclawith.task_missing_user eventId=${eventId} payloadKeys=${Object.keys(p).join(",")} messageKeys=${messageKeys}`,
           );
           return;
         }
