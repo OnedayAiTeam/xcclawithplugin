@@ -158,7 +158,7 @@ OpenClaw 向 **平台用户** 的 **网页单聊** 投递助手消息；**不经
 
 **下行回执**（`type: event`）：
 
-- 成功：`payload.source` = **`clawith.user_dm_ok`**，含 **`conversation_id`**（实际写入的 converter id）。  
+- 成功：`payload.source` = **`clawith.user_dm_ok`**，**至少**含 **`conversation_id`**（实际写入的 converter id）。**`target_user_id` 可省略**（集成侧可用待发队列上的 `conversation_id` 关联）。  
 - 失败：`payload.source` = **`clawith.user_dm_failed`**，`payload.message` 为英文短语错误说明。
 
 网页端通过 **主站浏览器聊天 WebSocket**（与网页单聊同一套连接，路径由部署提供）可收到 `type: "done"` 等，且应带 **`conversation_id`** 与会话对齐。

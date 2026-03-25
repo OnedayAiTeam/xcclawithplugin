@@ -14447,24 +14447,41 @@ var LonglinkHub = class {
       w.reject(err);
     }
   }
-  settleUserDmOk(uidRaw, cidRaw) {
-    const uid = uidRaw.trim().toLowerCase();
+  /**
+   * Match outbound `sendUserDmAwaitAck` waiters. Clawith may omit `target_user_id` on `user_dm_ok`
+   * (payload only `source` + `conversation_id`); then we match by `conversation_id` and use the waiter's user id.
+   * @returns settled users.id (lowercase) if a waiter was resolved, else null
+   */
+  settleUserDmAckSuccess(cidRaw, uidFromPayload) {
     const cid = cidRaw.trim().toLowerCase();
-    const idx = this.userDmAckWaiters.findIndex(
-      (w) => w.targetUserId === uid && w.conversationId === cid
-    );
-    if (idx >= 0) {
-      const w = this.userDmAckWaiters.splice(idx, 1)[0];
-      clearTimeout(w.timer);
-      w.resolve({ conversationId: cidRaw.trim() });
+    let idx = -1;
+    if (uidFromPayload?.trim()) {
+      const uid = uidFromPayload.trim().toLowerCase();
+      idx = this.userDmAckWaiters.findIndex(
+        (w2) => w2.targetUserId === uid && w2.conversationId === cid
+      );
     }
+    if (idx < 0) {
+      idx = this.userDmAckWaiters.findIndex((w2) => w2.conversationId === cid);
+    }
+    if (idx < 0) return null;
+    const w = this.userDmAckWaiters.splice(idx, 1)[0];
+    clearTimeout(w.timer);
+    const uidMem = uidFromPayload?.trim() ? uidFromPayload.trim().toLowerCase() : w.targetUserId;
+    this.memory.setUserConversation(uidMem, cidRaw.trim());
+    w.resolve({ conversationId: cidRaw.trim() });
+    return uidMem;
   }
-  settleUserDmFailed(message, targetHint) {
+  settleUserDmFailed(message, targetHint, conversationHint) {
     if (this.userDmAckWaiters.length === 0) return;
     let idx = -1;
     if (targetHint) {
       const t = targetHint.trim().toLowerCase();
       idx = this.userDmAckWaiters.findIndex((w2) => w2.targetUserId === t);
+    }
+    if (idx < 0 && conversationHint?.trim()) {
+      const c = conversationHint.trim().toLowerCase();
+      idx = this.userDmAckWaiters.findIndex((w2) => w2.conversationId === c);
     }
     if (idx < 0) idx = 0;
     const w = this.userDmAckWaiters.splice(idx, 1)[0];
@@ -14664,22 +14681,31 @@ var LonglinkHub = class {
       if (src === "clawith.user_dm_ok") {
         const cid = frame.payload.conversation_id;
         const uid = frame.payload.target_user_id;
-        if (typeof cid === "string" && typeof uid === "string") {
-          this.memory.setUserConversation(uid, cid);
-          this.settleUserDmOk(uid, cid);
+        if (typeof cid === "string" && cid.trim()) {
+          const uidStr = typeof uid === "string" && uid.trim() ? uid : void 0;
+          const settledUid = this.settleUserDmAckSuccess(cid, uidStr);
+          if (settledUid === null) {
+            if (uidStr) {
+              this.memory.setUserConversation(uidStr, cid);
+            } else {
+              const rev = this.memory.getUserIdForConversation(cid);
+              if (rev) this.memory.setUserConversation(rev, cid);
+            }
+          }
           this.log.info(
             xcLine("longlink.rx", "user_dm_ok", {
-              target_user_id: uid,
+              target_user_id: settledUid ?? uidStr ?? "(omitted_by_server; matched_by_conversation_or_memory)",
               conversation_id: cid,
-              meaning: "Clawith accepted outbound user_dm; memory updated"
+              payloadKeys,
+              meaning: "Clawith accepted outbound user_dm"
             })
           );
         } else {
           this.log.warn(
             xcLine("longlink.rx", "user_dm_ok.malformed", {
-              hasCid: typeof cid === "string",
-              hasUid: typeof uid === "string",
-              payloadKeys
+              hasCid: typeof cid === "string" && cid.trim().length > 0,
+              payloadKeys,
+              meaning: "missing conversation_id"
             })
           );
         }
@@ -14698,7 +14724,11 @@ var LonglinkHub = class {
             meaning: msg.includes("not found") || msg.includes("Not found") ? "users.id unknown to gateway or not visible to this bot" : "see message from Clawith"
           })
         );
-        this.settleUserDmFailed(msg, typeof tid === "string" ? tid : void 0);
+        this.settleUserDmFailed(
+          msg,
+          typeof tid === "string" ? tid : void 0,
+          typeof cid === "string" ? cid : void 0
+        );
         return;
       }
       if (src === "clawith.peer_message_ok") {
@@ -15059,29 +15089,6 @@ function sessionPeerFromConversationId(conversationId) {
   xcConsole("debug", "sessionKeys", "sessionPeerFromConversationId", { conversationId: c, peer });
   return peer;
 }
-function parseConversationIdFromThreadOrPeer(raw) {
-  if (raw === void 0 || raw === null) return void 0;
-  const t = String(raw).trim();
-  if (!t) return void 0;
-  const lower = t.toLowerCase();
-  if (lower.startsWith(CLAWITH_SESSION_PEER_PREFIX)) {
-    const rest = t.slice(CLAWITH_SESSION_PEER_PREFIX.length).trim();
-    if (isClawithUserIdShape(rest)) {
-      const cid = rest.toLowerCase();
-      xcConsole("info", "sessionKeys", "parseConversationId.from_clawith_prefix", { raw: t, conversationId: cid });
-      return cid;
-    }
-    xcConsole("warn", "sessionKeys", "parseConversationId.prefix_bad_uuid", { raw: t, rest });
-    return void 0;
-  }
-  if (isClawithUserIdShape(t)) {
-    const cid = t.toLowerCase();
-    xcConsole("info", "sessionKeys", "parseConversationId.bare_uuid", { conversationId: cid });
-    return cid;
-  }
-  xcConsole("warn", "sessionKeys", "parseConversationId.unrecognized", { raw: t });
-  return void 0;
-}
 
 // src/channel.ts
 function cfgWithXcclawithDmScopeDefault(cfg) {
@@ -15190,7 +15197,8 @@ var chatPlugin = createChatChannelPlugin({
         xcConsole("info", "outbound.sendText", "step1.entry", {
           accountId,
           rawTo: params.to,
-          threadId: params.threadId ?? null,
+          openclawThreadId: params.threadId ?? null,
+          note: "threadId ignored for Clawith routing; conversation_id is keyed by `to` only",
           textLen: (params.text ?? "").length
         });
         xcConsole("info", "outbound.sendText", "step2.ensure_longlink", { accountId });
@@ -15218,23 +15226,14 @@ var chatPlugin = createChatChannelPlugin({
           rawTo: params.to,
           section: effSection
         });
-        const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
         const existing = memory.getUserConversation(targetUserId);
-        const conversationId = fromThread ?? existing ?? crypto.randomUUID();
+        const conversationId = existing ?? crypto.randomUUID();
         xcConsole("info", "outbound.sendText", "step5.conversation_chosen", {
           targetUserId,
-          fromThread: fromThread ?? null,
           storedConversation: existing ?? null,
           chosenConversationId: conversationId,
-          source: fromThread ? "threadId" : existing ? "memory" : "new_random_uuid"
+          source: existing ? "memory_by_to_uuid" : "new_random_uuid"
         });
-        if (fromThread && existing && fromThread !== existing) {
-          xcConsole("warn", "outbound.sendText", "step5b.thread_overrides_memory", {
-            fromThread,
-            existing,
-            targetUserId
-          });
-        }
         memory.setUserConversation(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
         xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm_await_ack", {
@@ -15270,7 +15269,7 @@ var xcclawithChannelPlugin = {
         if (x && isClawithUserIdShape(x.toLowerCase())) return true;
         return s.length > 0;
       },
-      hint: "Clawith: `to` = user:<uuid>, bare users.id, or \u4E2D\u6587/\u62FC\u97F3/@\u6635\u79F0/email (directory). User message success only after Clawith user_dm_ok. Peer: xcclawith_directory shows kind=openclaw online; offline peers must not use xcclawith_peer_message."
+      hint: "Clawith: `to` = UUID (user id or agent id per your platform; disjoint) or names via directory. Per-`to` conversation reuse uses plugin memory keyed by that UUID only \u2014 OpenClaw `threadId` is not used. Peer: xcclawith_peer_message + directory `online`."
     }
   },
   agentPrompt: {
@@ -15278,7 +15277,8 @@ var xcclawithChannelPlugin = {
       "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
       "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message \u2014 it will be blocked. kind=user has no online requirement.",
       "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) \u2192 xcclawith_peer_message; success only after peer_message_ok.",
-      "Clawith / xcclawith: Session peer id is clawith-<conversation_id>. Reuse a thread via message tool threadId = that UUID (or clawith-<uuid>)."
+      "Clawith / xcclawith: Web DM `conversation_id` is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is global to the process and intentionally ignored \u2014 do not rely on it for Clawith threading.",
+      "Clawith / xcclawith: Inbound OpenClaw session peer id remains clawith-<conversation_id> from the gateway task; that is separate from outbound `threadId`."
     ]
   },
   gateway: {

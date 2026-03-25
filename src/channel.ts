@@ -23,10 +23,7 @@ import { LonglinkHub } from "./longlink-hub.js";
 import { isClawithUserIdShape } from "./clawith-target.js";
 import { resolveEffectiveSection, xcclawithSectionSchema, channelConfigSchema } from "./schema.js";
 import type { XcclawithSection } from "./schema.js";
-import {
-  parseConversationIdFromThreadOrPeer,
-  sessionPeerFromConversationId,
-} from "./session-keys.js";
+import { sessionPeerFromConversationId } from "./session-keys.js";
 import { xcBoth, xcConsole } from "./trace-log.js";
 
 export type ResolvedXcclawith = XcclawithSection & { accountId: string };
@@ -152,7 +149,8 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
         xcConsole("info", "outbound.sendText", "step1.entry", {
           accountId,
           rawTo: params.to,
-          threadId: params.threadId ?? null,
+          openclawThreadId: params.threadId ?? null,
+          note: "threadId ignored for Clawith routing; conversation_id is keyed by `to` only",
           textLen: (params.text ?? "").length,
         });
         xcConsole("info", "outbound.sendText", "step2.ensure_longlink", { accountId });
@@ -180,23 +178,14 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
           rawTo: params.to,
           section: effSection,
         });
-        const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
         const existing = memory.getUserConversation(targetUserId);
-        const conversationId = fromThread ?? existing ?? crypto.randomUUID();
+        const conversationId = existing ?? crypto.randomUUID();
         xcConsole("info", "outbound.sendText", "step5.conversation_chosen", {
           targetUserId,
-          fromThread: fromThread ?? null,
           storedConversation: existing ?? null,
           chosenConversationId: conversationId,
-          source: fromThread ? "threadId" : existing ? "memory" : "new_random_uuid",
+          source: existing ? "memory_by_to_uuid" : "new_random_uuid",
         });
-        if (fromThread && existing && fromThread !== existing) {
-          xcConsole("warn", "outbound.sendText", "step5b.thread_overrides_memory", {
-            fromThread,
-            existing,
-            targetUserId,
-          });
-        }
         memory.setUserConversation(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
         xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm_await_ack", {
@@ -233,7 +222,7 @@ export const xcclawithChannelPlugin = {
         if (x && isClawithUserIdShape(x.toLowerCase())) return true;
         return s.length > 0;
       },
-      hint: "Clawith: `to` = user:<uuid>, bare users.id, or 中文/拼音/@昵称/email (directory). User message success only after Clawith user_dm_ok. Peer: xcclawith_directory shows kind=openclaw online; offline peers must not use xcclawith_peer_message.",
+      hint: "Clawith: `to` = UUID (user id or agent id per your platform; disjoint) or names via directory. Per-`to` conversation reuse uses plugin memory keyed by that UUID only — OpenClaw `threadId` is not used. Peer: xcclawith_peer_message + directory `online`.",
     },
   },
   agentPrompt: {
@@ -241,7 +230,8 @@ export const xcclawithChannelPlugin = {
       "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or 中文 / 拼音 / @昵称 / email — non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
       "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message — it will be blocked. kind=user has no online requirement.",
       "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) → xcclawith_peer_message; success only after peer_message_ok.",
-      "Clawith / xcclawith: Session peer id is clawith-<conversation_id>. Reuse a thread via message tool threadId = that UUID (or clawith-<uuid>).",
+      "Clawith / xcclawith: Web DM `conversation_id` is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is global to the process and intentionally ignored — do not rely on it for Clawith threading.",
+      "Clawith / xcclawith: Inbound OpenClaw session peer id remains clawith-<conversation_id> from the gateway task; that is separate from outbound `threadId`.",
     ],
   },
   gateway: {

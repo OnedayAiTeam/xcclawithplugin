@@ -113,25 +113,44 @@ export class LonglinkHub {
     }
   }
 
-  private settleUserDmOk(uidRaw: string, cidRaw: string): void {
-    const uid = uidRaw.trim().toLowerCase();
+  /**
+   * Match outbound `sendUserDmAwaitAck` waiters. Clawith may omit `target_user_id` on `user_dm_ok`
+   * (payload only `source` + `conversation_id`); then we match by `conversation_id` and use the waiter's user id.
+   * @returns settled users.id (lowercase) if a waiter was resolved, else null
+   */
+  private settleUserDmAckSuccess(cidRaw: string, uidFromPayload?: string): string | null {
     const cid = cidRaw.trim().toLowerCase();
-    const idx = this.userDmAckWaiters.findIndex(
-      (w) => w.targetUserId === uid && w.conversationId === cid,
-    );
-    if (idx >= 0) {
-      const w = this.userDmAckWaiters.splice(idx, 1)[0]!;
-      clearTimeout(w.timer);
-      w.resolve({ conversationId: cidRaw.trim() });
+    let idx = -1;
+    if (uidFromPayload?.trim()) {
+      const uid = uidFromPayload.trim().toLowerCase();
+      idx = this.userDmAckWaiters.findIndex(
+        (w) => w.targetUserId === uid && w.conversationId === cid,
+      );
     }
+    if (idx < 0) {
+      idx = this.userDmAckWaiters.findIndex((w) => w.conversationId === cid);
+    }
+    if (idx < 0) return null;
+    const w = this.userDmAckWaiters.splice(idx, 1)[0]!;
+    clearTimeout(w.timer);
+    const uidMem = uidFromPayload?.trim()
+      ? uidFromPayload.trim().toLowerCase()
+      : w.targetUserId;
+    this.memory.setUserConversation(uidMem, cidRaw.trim());
+    w.resolve({ conversationId: cidRaw.trim() });
+    return uidMem;
   }
 
-  private settleUserDmFailed(message: string, targetHint?: string): void {
+  private settleUserDmFailed(message: string, targetHint?: string, conversationHint?: string): void {
     if (this.userDmAckWaiters.length === 0) return;
     let idx = -1;
     if (targetHint) {
       const t = targetHint.trim().toLowerCase();
       idx = this.userDmAckWaiters.findIndex((w) => w.targetUserId === t);
+    }
+    if (idx < 0 && conversationHint?.trim()) {
+      const c = conversationHint.trim().toLowerCase();
+      idx = this.userDmAckWaiters.findIndex((w) => w.conversationId === c);
     }
     if (idx < 0) idx = 0;
     const w = this.userDmAckWaiters.splice(idx, 1)[0]!;
@@ -350,22 +369,31 @@ export class LonglinkHub {
       if (src === "clawith.user_dm_ok") {
         const cid = frame.payload.conversation_id;
         const uid = frame.payload.target_user_id;
-        if (typeof cid === "string" && typeof uid === "string") {
-          this.memory.setUserConversation(uid, cid);
-          this.settleUserDmOk(uid, cid);
+        if (typeof cid === "string" && cid.trim()) {
+          const uidStr = typeof uid === "string" && uid.trim() ? uid : undefined;
+          const settledUid = this.settleUserDmAckSuccess(cid, uidStr);
+          if (settledUid === null) {
+            if (uidStr) {
+              this.memory.setUserConversation(uidStr, cid);
+            } else {
+              const rev = this.memory.getUserIdForConversation(cid);
+              if (rev) this.memory.setUserConversation(rev, cid);
+            }
+          }
           this.log.info(
             xcLine("longlink.rx", "user_dm_ok", {
-              target_user_id: uid,
+              target_user_id: settledUid ?? uidStr ?? "(omitted_by_server; matched_by_conversation_or_memory)",
               conversation_id: cid,
-              meaning: "Clawith accepted outbound user_dm; memory updated",
+              payloadKeys,
+              meaning: "Clawith accepted outbound user_dm",
             }),
           );
         } else {
           this.log.warn(
             xcLine("longlink.rx", "user_dm_ok.malformed", {
-              hasCid: typeof cid === "string",
-              hasUid: typeof uid === "string",
+              hasCid: typeof cid === "string" && cid.trim().length > 0,
               payloadKeys,
+              meaning: "missing conversation_id",
             }),
           );
         }
@@ -388,7 +416,11 @@ export class LonglinkHub {
                 : "see message from Clawith",
           }),
         );
-        this.settleUserDmFailed(msg, typeof tid === "string" ? tid : undefined);
+        this.settleUserDmFailed(
+          msg,
+          typeof tid === "string" ? tid : undefined,
+          typeof cid === "string" ? cid : undefined,
+        );
         return;
       }
 
