@@ -1,0 +1,25 @@
+{
+  "id": "xcclawith",
+  "name": "Clawith Longlink",
+  "description": "Clawith Longlink channel (web DMs and peer OpenClaw over WebSocket).",
+  "kind": "channel",
+  "channels": ["xcclawith"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "xcclawith": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "host": { "type": "string", "description": "Clawith host or IP (optional http:// prefix is stripped)." },
+          "apiKey": { "type": "string", "description": "Gateway API key (same as longlink query apiKey)." },
+          "directoryPort": { "type": "integer", "minimum": 1, "default": 3008 },
+          "longlinkPort": { "type": "integer", "minimum": 1, "default": 38438 },
+          "userId": { "type": "string", "description": "Longlink query userId (default agent0323)." }
+        },
+        "required": ["host", "apiKey"]
+      }
+    }
+  }
+}

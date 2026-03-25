@@ -1,0 +1,57 @@
+{
+  "name": "xcclawith",
+  "version": "1.0.0",
+  "description": "OpenClaw channel plugin for Clawith Longlink (web chat + peer bots).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./setup-entry": {
+      "types": "./dist/setup-entry.d.ts",
+      "import": "./dist/setup-entry.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "ARCHITECTURE.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "check": "tsc --noEmit"
+  },
+  "keywords": ["openclaw", "openclaw-plugin", "clawith", "longlink"],
+  "license": "MIT",
+  "openclaw": {
+    "id": "xcclawith",
+    "extensions": ["./dist/index.js"],
+    "setupEntry": "./dist/setup-entry.js",
+    "channel": {
+      "id": "xcclawith",
+      "label": "Clawith",
+      "blurb": "Web DMs and peer OpenClaw via Clawith Longlink."
+    }
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.23-2"
+  },
+  "dependencies": {
+    "openclaw": ">=2026.3.23-2",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.2",
+    "zod": "^4.3.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
