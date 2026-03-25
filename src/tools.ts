@@ -31,7 +31,8 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
       "kind=user has no online field / requirement. " +
       "The channel also resolves non-UUID message `to` via this API. " +
       "q optional; omit q to list visible rows (default 20, max 50). " +
-      "kind=user → users.id; kind=openclaw → agents.id — both can be used as message `to` (bare UUID) for `clawith.user_dm` per Clawith routing.",
+      "kind=user → users.id; kind=openclaw → agents.id — both can be used as message `to` (bare UUID) for `clawith.user_dm` per Clawith routing. " +
+      "**`requires_reply` (boolean, default false):** one Clawith meaning on every path — **this conversational turn is marked as expecting a reply from the other party** (exact `report`/throttling behavior is platform-defined). **Outbound:** omit or false → plugin does not set `requires_reply` on `user_dm`; `true` → forwarded on the wire. **Inbound:** the same flag may appear on `gateway.task` `message` for the text **you received** — same semantics, **which leg** of the chat carries it (them→you vs you→them). The built-in `message` tool schema may omit the flag; the channel still reads it from the outbound send context when OpenClaw passes it through.",
     parameters: Type.Object({
       q: Type.Optional(
         Type.String({
@@ -90,7 +91,8 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
           "\n\nFor kind=openclaw, `online: false` means that bot is not connected on longlink. " +
           "kind=user: use id as message `to` (user:<uuid> or bare UUID). " +
           "kind=openclaw: use id as bare UUID in message `to` for bot-to-bot via the same `clawith.user_dm` path when Clawith allows it. " +
-          "Sends only succeed after Clawith returns user_dm_ok.";
+          "Sends only succeed after Clawith returns user_dm_ok. " +
+          "`requires_reply`: same meaning as on inbound tasks — **expect a reply from the other side** for this turn; default **false**. Set **true** on outbound when needed; xcclawith forwards **true** on `user_dm` even if the `message` tool schema omits the field.";
       }
       xcConsole("info", "tools.directory", "execute.done", { toolCallId, rowCount: lines.length });
       return {

@@ -15206,14 +15206,14 @@ var xcclawithChannelPlugin = {
         if (x && isClawithUserIdShape(x.toLowerCase())) return true;
         return s.length > 0;
       },
-      hint: "Clawith: `to` = bare UUID (users.id or agents.id when Clawith routes it) or directory-resolved user labels. Per-`to` conversation reuse uses plugin memory; OpenClaw `threadId` is not used. Optional `requires_reply` / `requiresReply` on `message` is forwarded on `clawith.user_dm` when true."
+      hint: "Clawith: `to` = bare UUID or directory-resolved user labels; per-`to` conversation in plugin memory; `threadId` ignored. `requires_reply` / `requiresReply`: **default false** \u2014 same idea as inbound `gateway.task`: **this turn expects a reply from the other party**; only **true** is forwarded on `user_dm`."
     }
   },
   agentPrompt: {
     messageToolHints: () => [
       "Clawith / xcclawith: Message `to` may be user:<uuid>, bare UUID (users.id or agents.id when the platform accepts it), or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory (kind=user rows only). Sends use longlink `clawith.user_dm` and succeed only after user_dm_ok.",
-      "Clawith / xcclawith: **Outbound** `message` may include **`requires_reply` or `requiresReply` (boolean)** when your OpenClaw build exposes it; this plugin forwards **`true`** onto `clawith.user_dm` as `requires_reply` (omitted when false). Use when Clawith should treat the turn as expecting follow-up / relaxed send pacing per platform rules.",
-      "Clawith / xcclawith: **Inbound** `gateway.task` still carries `message.requires_reply` / `message.requiresReply` on the envelope \u2014 that describes the task you received, separate from what you pass on outbound `message`.",
+      "Clawith / xcclawith: **`requires_reply` (boolean, default false):** same meaning **inbound and outbound** \u2014 **this turn is tagged as expecting a reply from the other party** (Clawith applies `report`/pacing/throttling per its rules). Inbound it is on `gateway.task` `message`; outbound pass it on the `message` send context when OpenClaw exposes it \u2014 the plugin forwards **true** as `requires_reply` on `user_dm` and omits the field when false/unset.",
+      "Clawith / xcclawith: The **xcclawith_directory** tool `description` duplicates key `message` / `requires_reply` notes \u2014 registered tool text is injected with capabilities and is often easier for the model to follow than channel hints alone.",
       "Clawith / xcclawith: xcclawith_directory: kind=user \u2192 message `to`; kind=openclaw \u2192 bare agents.id as `to` for bot-to-bot when Clawith routes via the same user_dm path. `online` on openclaw rows indicates longlink presence (informational).",
       "Clawith / xcclawith: `conversation_id` for web DM is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is intentionally ignored for Clawith threading.",
       "Clawith / xcclawith: Inbound session peer id remains clawith-<conversation_id> from the gateway task; separate from outbound `threadId`."
@@ -18070,7 +18070,7 @@ function registerXcclawithTools(api) {
   const directoryTool = {
     name: "xcclawith_directory",
     label: "Clawith directory",
-    description: "Calls GET /api/gateway/directory. Each row may include `online` (kind=openclaw only): indicates whether that bot has longlink connected. kind=user has no online field / requirement. The channel also resolves non-UUID message `to` via this API. q optional; omit q to list visible rows (default 20, max 50). kind=user \u2192 users.id; kind=openclaw \u2192 agents.id \u2014 both can be used as message `to` (bare UUID) for `clawith.user_dm` per Clawith routing.",
+    description: "Calls GET /api/gateway/directory. Each row may include `online` (kind=openclaw only): indicates whether that bot has longlink connected. kind=user has no online field / requirement. The channel also resolves non-UUID message `to` via this API. q optional; omit q to list visible rows (default 20, max 50). kind=user \u2192 users.id; kind=openclaw \u2192 agents.id \u2014 both can be used as message `to` (bare UUID) for `clawith.user_dm` per Clawith routing. **`requires_reply` (boolean, default false):** one Clawith meaning on every path \u2014 **this conversational turn is marked as expecting a reply from the other party** (exact `report`/throttling behavior is platform-defined). **Outbound:** omit or false \u2192 plugin does not set `requires_reply` on `user_dm`; `true` \u2192 forwarded on the wire. **Inbound:** the same flag may appear on `gateway.task` `message` for the text **you received** \u2014 same semantics, **which leg** of the chat carries it (them\u2192you vs you\u2192them). The built-in `message` tool schema may omit the flag; the channel still reads it from the outbound send context when OpenClaw passes it through.",
     parameters: Type.Object({
       q: Type.Optional(
         Type.String({
@@ -18123,7 +18123,7 @@ function registerXcclawithTools(api) {
         });
         text += "\n\nNo rows: broaden q, try username/pinyin, or omit q to list visible contacts (check Clawith visibility rules).";
       } else {
-        text += "\n\nFor kind=openclaw, `online: false` means that bot is not connected on longlink. kind=user: use id as message `to` (user:<uuid> or bare UUID). kind=openclaw: use id as bare UUID in message `to` for bot-to-bot via the same `clawith.user_dm` path when Clawith allows it. Sends only succeed after Clawith returns user_dm_ok.";
+        text += "\n\nFor kind=openclaw, `online: false` means that bot is not connected on longlink. kind=user: use id as message `to` (user:<uuid> or bare UUID). kind=openclaw: use id as bare UUID in message `to` for bot-to-bot via the same `clawith.user_dm` path when Clawith allows it. Sends only succeed after Clawith returns user_dm_ok. `requires_reply`: same meaning as on inbound tasks \u2014 **expect a reply from the other side** for this turn; default **false**. Set **true** on outbound when needed; xcclawith forwards **true** on `user_dm` even if the `message` tool schema omits the field.";
       }
       xcConsole("info", "tools.directory", "execute.done", { toolCallId, rowCount: lines.length });
       return {

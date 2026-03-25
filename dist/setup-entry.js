@@ -15206,14 +15206,14 @@ var xcclawithChannelPlugin = {
         if (x && isClawithUserIdShape(x.toLowerCase())) return true;
         return s.length > 0;
       },
-      hint: "Clawith: `to` = bare UUID (users.id or agents.id when Clawith routes it) or directory-resolved user labels. Per-`to` conversation reuse uses plugin memory; OpenClaw `threadId` is not used. Optional `requires_reply` / `requiresReply` on `message` is forwarded on `clawith.user_dm` when true."
+      hint: "Clawith: `to` = bare UUID or directory-resolved user labels; per-`to` conversation in plugin memory; `threadId` ignored. `requires_reply` / `requiresReply`: **default false** \u2014 same idea as inbound `gateway.task`: **this turn expects a reply from the other party**; only **true** is forwarded on `user_dm`."
     }
   },
   agentPrompt: {
     messageToolHints: () => [
       "Clawith / xcclawith: Message `to` may be user:<uuid>, bare UUID (users.id or agents.id when the platform accepts it), or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory (kind=user rows only). Sends use longlink `clawith.user_dm` and succeed only after user_dm_ok.",
-      "Clawith / xcclawith: **Outbound** `message` may include **`requires_reply` or `requiresReply` (boolean)** when your OpenClaw build exposes it; this plugin forwards **`true`** onto `clawith.user_dm` as `requires_reply` (omitted when false). Use when Clawith should treat the turn as expecting follow-up / relaxed send pacing per platform rules.",
-      "Clawith / xcclawith: **Inbound** `gateway.task` still carries `message.requires_reply` / `message.requiresReply` on the envelope \u2014 that describes the task you received, separate from what you pass on outbound `message`.",
+      "Clawith / xcclawith: **`requires_reply` (boolean, default false):** same meaning **inbound and outbound** \u2014 **this turn is tagged as expecting a reply from the other party** (Clawith applies `report`/pacing/throttling per its rules). Inbound it is on `gateway.task` `message`; outbound pass it on the `message` send context when OpenClaw exposes it \u2014 the plugin forwards **true** as `requires_reply` on `user_dm` and omits the field when false/unset.",
+      "Clawith / xcclawith: The **xcclawith_directory** tool `description` duplicates key `message` / `requires_reply` notes \u2014 registered tool text is injected with capabilities and is often easier for the model to follow than channel hints alone.",
       "Clawith / xcclawith: xcclawith_directory: kind=user \u2192 message `to`; kind=openclaw \u2192 bare agents.id as `to` for bot-to-bot when Clawith routes via the same user_dm path. `online` on openclaw rows indicates longlink presence (informational).",
       "Clawith / xcclawith: `conversation_id` for web DM is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is intentionally ignored for Clawith threading.",
       "Clawith / xcclawith: Inbound session peer id remains clawith-<conversation_id> from the gateway task; separate from outbound `threadId`."
