@@ -239,8 +239,10 @@ export const xcclawithChannelPlugin = {
 
         await dispatchInboundDirectDmWithRuntime({
           cfg: cfgWithXcclawithDmScopeDefault(ctx.cfg),
-          // OpenClaw injects the full channel runtime; types are narrower than DirectDmRuntime.
-          runtime: rt as unknown as Parameters<typeof dispatchInboundDirectDmWithRuntime>[0]["runtime"],
+          // Gateway passes `channelRuntime` = PluginRuntime["channel"]; dispatch expects `{ channel: that }`.
+          runtime: { channel: rt } as Parameters<
+            typeof dispatchInboundDirectDmWithRuntime
+          >[0]["runtime"],
           channel: CHANNEL_ID,
           channelLabel: "Clawith",
           accountId: ctx.accountId,
