@@ -14275,6 +14275,12 @@ function clawithDmPeerId(to) {
   if (t.toLowerCase().startsWith("user:")) return t.slice(5).trim();
   return t;
 }
+function untilAbort(signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
 function resolveAccount(cfg, accountId) {
   const id = normalizeAccountId(accountId);
   const raw = readSectionRaw2(cfg);
@@ -14479,6 +14485,7 @@ ${chunk}` : chunk;
       hub.start();
       setHub(ctx.accountId, hub);
       sink.info(`xcclawith.gateway_started accountId=${ctx.accountId}`);
+      await untilAbort(ctx.abortSignal);
     },
     stopAccount: async (ctx) => {
       removeHub(ctx.accountId);

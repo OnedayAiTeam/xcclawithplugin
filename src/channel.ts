@@ -54,6 +54,14 @@ function clawithDmPeerId(to: string): string {
   return t;
 }
 
+/** OpenClaw keeps the `startAccount` promise open until the channel stops; resolving too early triggers gateway auto-restart. */
+function untilAbort(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 function resolveAccount(cfg: OpenClawConfig, accountId?: string | null): ResolvedXcclawith {
   const id = normalizeAccountId(accountId);
   const raw = readSectionRaw(cfg);
@@ -271,6 +279,8 @@ export const xcclawithChannelPlugin = {
       hub.start();
       setHub(ctx.accountId, hub);
       sink.info(`xcclawith.gateway_started accountId=${ctx.accountId}`);
+
+      await untilAbort(ctx.abortSignal);
     },
     stopAccount: async (ctx: ChannelGatewayContext<ResolvedXcclawith>) => {
       removeHub(ctx.accountId);
