@@ -109,6 +109,7 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
     label: "Clawith peer OpenClaw message",
     description:
       "Send to another OpenClaw via longlink (clawith.peer_message). target_agent_id = agents.id (kind=openclaw). " +
+      "Optional `requires_reply` is **only** on this tool (not on the generic `message` tool). " +
       "Plugin checks directory: if online=false, send is rejected. Success only after peer_message_ok.",
     parameters: Type.Object({
       target_agent_id: Type.String({
@@ -118,7 +119,7 @@ export function registerXcclawithTools(api: OpenClawPluginApi): void {
       requires_reply: Type.Optional(
         Type.Boolean({
           description:
-            "If true, expect the peer to report; relaxes send-side throttling per Clawith rules.",
+            "Peer longlink only. Not available on OpenClaw `message`. If true, Clawith may expect the peer to engage / report; use when the platform marks the turn as needing a reply.",
         }),
       ),
       conversation_id: Type.Optional(

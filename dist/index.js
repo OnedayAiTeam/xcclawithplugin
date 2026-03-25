@@ -15334,6 +15334,8 @@ var xcclawithChannelPlugin = {
   agentPrompt: {
     messageToolHints: () => [
       "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or \u4E2D\u6587 / \u62FC\u97F3 / @\u6635\u79F0 / email \u2014 non-UUID is resolved via GET /api/gateway/directory. User DMs only succeed after the gateway returns user_dm_ok (failures surface as tool/channel errors).",
+      "Clawith / xcclawith: The core OpenClaw `message` tool has **no** `requires_reply` field. Clawith puts reply expectations on **inbound** longlink tasks: `gateway.task` payload `message.requires_reply` or `message.requiresReply` (boolean). That is envelope metadata you infer from the inbound DM / session, not something you pass when calling `message`.",
+      "Clawith / xcclawith: **Outbound** `requires_reply` exists only on **xcclawith_peer_message** (optional boolean), for agent-to-agent longlink \u2014 not on `message`. Use it when you need the peer flow to treat the send as requiring follow-up per Clawith.",
       "Clawith / xcclawith: xcclawith_directory rows include `online` for kind=openclaw (peer bot longlink connected). If online is false, do not call xcclawith_peer_message \u2014 it will be blocked. kind=user has no online requirement.",
       "Clawith / xcclawith: Peer OpenClaw: xcclawith_directory (kind=openclaw, check online) \u2192 xcclawith_peer_message; success only after peer_message_ok.",
       "Clawith / xcclawith: Web DM `conversation_id` is chosen per message `to` UUID (in-memory map); OpenClaw `threadId` is global to the process and intentionally ignored \u2014 do not rely on it for Clawith threading.",
@@ -18298,7 +18300,7 @@ function registerXcclawithTools(api) {
   const peerTool = {
     name: "xcclawith_peer_message",
     label: "Clawith peer OpenClaw message",
-    description: "Send to another OpenClaw via longlink (clawith.peer_message). target_agent_id = agents.id (kind=openclaw). Plugin checks directory: if online=false, send is rejected. Success only after peer_message_ok.",
+    description: "Send to another OpenClaw via longlink (clawith.peer_message). target_agent_id = agents.id (kind=openclaw). Optional `requires_reply` is **only** on this tool (not on the generic `message` tool). Plugin checks directory: if online=false, send is rejected. Success only after peer_message_ok.",
     parameters: Type.Object({
       target_agent_id: Type.String({
         description: "agents.id UUID from xcclawith_directory (kind=openclaw). Bare UUID only."
@@ -18306,7 +18308,7 @@ function registerXcclawithTools(api) {
       content: Type.String({ description: "Message body for the peer." }),
       requires_reply: Type.Optional(
         Type.Boolean({
-          description: "If true, expect the peer to report; relaxes send-side throttling per Clawith rules."
+          description: "Peer longlink only. Not available on OpenClaw `message`. If true, Clawith may expect the peer to engage / report; use when the platform marks the turn as needing a reply."
         })
       ),
       conversation_id: Type.Optional(
