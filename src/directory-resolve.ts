@@ -27,6 +27,11 @@ export function exactMatchUserRow(item: DirectoryItem, needleRaw: string): boole
 
   const d = (item.display_name ?? "").trim().toLowerCase();
   if (d === needle) return true;
+  // e.g. display "李时禹" vs target "@李时禹 - 测试网页" → needle "李时禹 - 测试网页"
+  if (d.length > 0 && needle.startsWith(d) && needle.length > d.length) {
+    const rest = needle.slice(d.length);
+    if (rest.startsWith(" ") || rest.startsWith("-") || rest.startsWith(" -")) return true;
+  }
 
   return false;
 }
@@ -55,17 +60,21 @@ export async function resolveOutboundTargetToUserId(params: {
   const { items } = await fetchGatewayDirectory({
     section: params.section,
     q: needle,
-    limit: 500,
+    limit: 50,
     log: params.log,
   });
-  const matches = pickExactUsers(items, needle);
+  const users = items.filter((i) => i.kind === "user");
+  let matches = pickExactUsers(items, needle);
+  if (matches.length === 0 && users.length === 1) {
+    matches = [users[0]!];
+  }
 
   if (matches.length === 1) {
     return matches[0]!.id;
   }
   if (matches.length === 0) {
     throw new Error(
-      `xcclawith_no_exact_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} — no kind=user row with exact username/email/display_name in directory results; use xcclawith_directory or user:<uuid>.`,
+      `xcclawith_no_exact_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} — no resolvable kind=user row; use xcclawith_directory or user:<uuid>.`,
     );
   }
   throw new Error(

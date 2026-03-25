@@ -19,6 +19,7 @@ import { resolveOutboundTargetToUserId } from "./directory-resolve.js";
 import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
 import { getMemory, removeHub, setHub } from "./hub-registry.js";
 import { LonglinkHub } from "./longlink-hub.js";
+import { isClawithUserIdShape, normalizeClawithTargetUserId } from "./clawith-target.js";
 import { resolveEffectiveSection, xcclawithSectionSchema, channelConfigSchema } from "./schema.js";
 import type { XcclawithSection } from "./schema.js";
 import {
@@ -184,11 +185,20 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
 
 export const xcclawithChannelPlugin = {
   ...chatPlugin,
+  messaging: {
+    targetResolver: {
+      looksLikeId: (_raw: string, normalized?: string) => {
+        const s = (normalized ?? _raw).trim();
+        return isClawithUserIdShape(normalizeClawithTargetUserId(s));
+      },
+      hint: "Clawith: prefer bare users.id UUID or user:<uuid> when known; else @handle / email / display_name (directory). Thread: clawith-<conversation_id>.",
+    },
+  },
   agentPrompt: {
     messageToolHints: () => [
       "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",
-      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / email / display_name — resolved via directory exact match when not a UUID.",
-      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory or user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw).",
+      "Clawith / xcclawith: Message `to` — if task payload, tool result, or context includes the Clawith users.id (UUID) or user:<uuid>, pass that value unchanged as `to`. Do not substitute display_name or @label when an id is available.",
+      "Clawith / xcclawith: Only when no user id is available, use @username / email / display_name (directory exact match). If lookup is ambiguous or fails, use xcclawith_directory then user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw).",
     ],
   },
   gateway: {

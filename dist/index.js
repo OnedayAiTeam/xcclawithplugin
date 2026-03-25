@@ -276,6 +276,10 @@ function exactMatchUserRow(item, needleRaw) {
   }
   const d = (item.display_name ?? "").trim().toLowerCase();
   if (d === needle) return true;
+  if (d.length > 0 && needle.startsWith(d) && needle.length > d.length) {
+    const rest = needle.slice(d.length);
+    if (rest.startsWith(" ") || rest.startsWith("-") || rest.startsWith(" -")) return true;
+  }
   return false;
 }
 function pickExactUsers(items, needle) {
@@ -291,16 +295,20 @@ async function resolveOutboundTargetToUserId(params) {
   const { items } = await fetchGatewayDirectory({
     section: params.section,
     q: needle,
-    limit: 500,
+    limit: 50,
     log: params.log
   });
-  const matches = pickExactUsers(items, needle);
+  const users = items.filter((i) => i.kind === "user");
+  let matches = pickExactUsers(items, needle);
+  if (matches.length === 0 && users.length === 1) {
+    matches = [users[0]];
+  }
   if (matches.length === 1) {
     return matches[0].id;
   }
   if (matches.length === 0) {
     throw new Error(
-      `xcclawith_no_exact_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} \u2014 no kind=user row with exact username/email/display_name in directory results; use xcclawith_directory or user:<uuid>.`
+      `xcclawith_no_exact_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} \u2014 no resolvable kind=user row; use xcclawith_directory or user:<uuid>.`
     );
   }
   throw new Error(
@@ -14594,6 +14602,15 @@ var chatPlugin = createChatChannelPlugin({
 });
 var xcclawithChannelPlugin = {
   ...chatPlugin,
+  messaging: {
+    targetResolver: {
+      looksLikeId: (_raw, normalized) => {
+        const s = (normalized ?? _raw).trim();
+        return isClawithUserIdShape(normalizeClawithTargetUserId(s));
+      },
+      hint: "Clawith: users.id UUID, user:<uuid>, @handle / name (directory), or clawith-<conversation_id> thread id."
+    }
+  },
   agentPrompt: {
     messageToolHints: () => [
       "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",

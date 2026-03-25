@@ -28,6 +28,12 @@ type ResolvedXcclawith = XcclawithSection & {
 
 declare const _default: {
     plugin: {
+        messaging: {
+            targetResolver: {
+                looksLikeId: (_raw: string, normalized?: string) => boolean;
+                hint: string;
+            };
+        };
         agentPrompt: {
             messageToolHints: () => string[];
         };
@@ -82,7 +88,6 @@ declare const _default: {
         bindings?: openclaw_plugin_sdk.ChannelConfiguredBindingProvider;
         streaming?: openclaw_plugin_sdk_channel_runtime.ChannelStreamingAdapter;
         threading?: openclaw_plugin_sdk_channel_runtime.ChannelThreadingAdapter;
-        messaging?: openclaw_plugin_sdk_core.ChannelMessagingAdapter;
         resolver?: openclaw_plugin_sdk_channel_runtime.ChannelResolverAdapter;
         actions?: openclaw_plugin_sdk.ChannelMessageActionAdapter;
         heartbeat?: openclaw_plugin_sdk_channel_runtime.ChannelHeartbeatAdapter;
