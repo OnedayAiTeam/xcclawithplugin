@@ -159,7 +159,14 @@ export class LonglinkHub {
       }
 
       if (src === "clawith.user_dm_failed") {
-        this.log.warn(`longlink.user_dm_failed message=${String(frame.payload.message)}`);
+        const msg = String(frame.payload.message ?? "");
+        const tid = frame.payload.target_user_id;
+        const cid = frame.payload.conversation_id;
+        this.log.warn(
+          `longlink.user_dm_failed message=${msg}` +
+            (typeof tid === "string" ? ` target_user_id=${tid}` : "") +
+            (typeof cid === "string" ? ` conversation_id=${cid}` : ""),
+        );
         return;
       }
 

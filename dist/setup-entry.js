@@ -14286,7 +14286,12 @@ var LonglinkHub = class {
         return;
       }
       if (src === "clawith.user_dm_failed") {
-        this.log.warn(`longlink.user_dm_failed message=${String(frame.payload.message)}`);
+        const msg = String(frame.payload.message ?? "");
+        const tid = frame.payload.target_user_id;
+        const cid = frame.payload.conversation_id;
+        this.log.warn(
+          `longlink.user_dm_failed message=${msg}` + (typeof tid === "string" ? ` target_user_id=${tid}` : "") + (typeof cid === "string" ? ` conversation_id=${cid}` : "")
+        );
         return;
       }
       if (src === "clawith.peer_message_ok") {
@@ -14608,14 +14613,14 @@ var xcclawithChannelPlugin = {
         const s = (normalized ?? _raw).trim();
         return isClawithUserIdShape(normalizeClawithTargetUserId(s));
       },
-      hint: "Clawith: users.id UUID, user:<uuid>, @handle / name (directory), or clawith-<conversation_id> thread id."
+      hint: "Clawith: prefer bare users.id UUID or user:<uuid> when known; else @handle / email / display_name (directory). Thread: clawith-<conversation_id>."
     }
   },
   agentPrompt: {
     messageToolHints: () => [
       "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",
-      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / email / display_name \u2014 resolved via directory exact match when not a UUID.",
-      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory or user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw)."
+      "Clawith / xcclawith: Message `to` \u2014 if task payload, tool result, or context includes the Clawith users.id (UUID) or user:<uuid>, pass that value unchanged as `to`. Do not substitute display_name or @label when an id is available.",
+      "Clawith / xcclawith: Only when no user id is available, use @username / email / display_name (directory exact match). If lookup is ambiguous or fails, use xcclawith_directory then user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw)."
     ]
   },
   gateway: {
