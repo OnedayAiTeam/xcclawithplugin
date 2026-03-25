@@ -572,20 +572,12 @@ var ClawithMemoryState = class {
   /** OpenClaw agent id -> last new_session_id used for peer thread */
   peerNewSessionIds = /* @__PURE__ */ new Map();
   setUserConversation(userId, conversationId) {
+    void userId;
+    void conversationId;
+  }
+  setUserConversation2(userId, conversationId) {
     const cid = conversationId.trim().toLowerCase();
     const uid = userId.trim().toLowerCase();
-    const prev = this.userConversationIds.get(uid);
-    if (prev && prev !== cid) {
-      xcConsole("info", "memory", "userConversation.remap", {
-        userId: uid,
-        previousConversationId: prev,
-        newConversationId: cid,
-        reason: "binding changed for same user"
-      });
-      this.conversationUserIds.delete(prev);
-    } else {
-      xcConsole("debug", "memory", "userConversation.set", { userId: uid, conversationId: cid });
-    }
     this.userConversationIds.set(uid, cid);
     this.conversationUserIds.set(cid, uid);
   }
@@ -15301,7 +15293,7 @@ var chatPlugin = createChatChannelPlugin({
           chosenConversationId: conversationId,
           source: existing ? "memory_by_to_uuid" : "gateway_converter"
         });
-        memory.setUserConversation(targetUserId, conversationId);
+        memory.setUserConversation2(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
         xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm_await_ack", {
           note: "throws if user_dm_failed or ack timeout"

@@ -13,20 +13,28 @@ export class ClawithMemoryState {
   readonly peerNewSessionIds = new Map<string, string>();
 
   setUserConversation(userId: string, conversationId: string): void {
+    void userId;
+    void conversationId;
+    // const cid = conversationId.trim().toLowerCase();
+    // const uid = userId.trim().toLowerCase();
+    // const prev = this.userConversationIds.get(uid);
+    // if (prev && prev !== cid) {
+    //   xcConsole("info", "memory", "userConversation.remap", {
+    //     userId: uid,
+    //     previousConversationId: prev,
+    //     newConversationId: cid,
+    //     reason: "binding changed for same user",
+    //   });
+    //   this.conversationUserIds.delete(prev);
+    // } else {
+    //   xcConsole("debug", "memory", "userConversation.set", { userId: uid, conversationId: cid });
+    // }
+    // this.userConversationIds.set(uid, cid);
+    // this.conversationUserIds.set(cid, uid);
+  }
+  setUserConversation2(userId: string, conversationId: string): void {
     const cid = conversationId.trim().toLowerCase();
     const uid = userId.trim().toLowerCase();
-    const prev = this.userConversationIds.get(uid);
-    if (prev && prev !== cid) {
-      xcConsole("info", "memory", "userConversation.remap", {
-        userId: uid,
-        previousConversationId: prev,
-        newConversationId: cid,
-        reason: "binding changed for same user",
-      });
-      this.conversationUserIds.delete(prev);
-    } else {
-      xcConsole("debug", "memory", "userConversation.set", { userId: uid, conversationId: cid });
-    }
     this.userConversationIds.set(uid, cid);
     this.conversationUserIds.set(cid, uid);
   }

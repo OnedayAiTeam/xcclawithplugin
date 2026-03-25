@@ -188,7 +188,7 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
           chosenConversationId: conversationId,
           source: existing ? "memory_by_to_uuid" : "gateway_converter",
         });
-        memory.setUserConversation(targetUserId, conversationId);
+        memory.setUserConversation2(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
         xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm_await_ack", {
           note: "throws if user_dm_failed or ack timeout",
