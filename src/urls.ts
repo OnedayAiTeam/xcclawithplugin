@@ -1,4 +1,5 @@
 import {
+  CONVERTER_HTTP_PATH,
   DEFAULT_DIRECTORY_PORT,
   DEFAULT_LONGLINK_PORT,
   DIRECTORY_HTTP_PATH,
@@ -47,6 +48,11 @@ export function buildDirectoryBaseUrl(host: string, directoryPort: number): stri
   const url = `http://${h}:${directoryPort}${DIRECTORY_HTTP_PATH}`;
   xcConsole("info", "urls", "buildDirectoryBaseUrl", { hostNorm: h, directoryPort, path: DIRECTORY_HTTP_PATH });
   return url;
+}
+
+export function buildConverterPostUrl(host: string, directoryPort: number): string {
+  const h = normalizeHost(host);
+  return `http://${h}:${directoryPort}${CONVERTER_HTTP_PATH}`;
 }
 
 export function buildLonglinkWsUrl(

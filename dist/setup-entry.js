@@ -19,6 +19,7 @@ import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/rout
 var CHANNEL_ID = "xcclawith";
 var LONGLINK_WS_PATH = "/ws";
 var DIRECTORY_HTTP_PATH = "/api/gateway/directory";
+var CONVERTER_HTTP_PATH = "/api/gateway/converter";
 var DEFAULT_DIRECTORY_PORT = 3008;
 var DEFAULT_LONGLINK_PORT = 38438;
 var DEFAULT_LONGLINK_USER_ID = "agent0323";
@@ -288,6 +289,10 @@ function buildDirectoryBaseUrl(host, directoryPort) {
   xcConsole("info", "urls", "buildDirectoryBaseUrl", { hostNorm: h, directoryPort, path: DIRECTORY_HTTP_PATH });
   return url2;
 }
+function buildConverterPostUrl(host, directoryPort) {
+  const h = normalizeHost(host);
+  return `http://${h}:${directoryPort}${CONVERTER_HTTP_PATH}`;
+}
 function buildLonglinkWsUrl(host, longlinkPort, apiKey, userId) {
   const h = normalizeHost(host);
   const q = new URLSearchParams({ apiKey, userId });
@@ -311,6 +316,35 @@ function resolvePorts(section) {
     fromSectionLl: section.longlinkPort !== void 0
   });
   return { directoryPort, longlinkPort };
+}
+
+// src/converter-api.ts
+async function postGatewayConverter(params) {
+  const { directoryPort } = resolvePorts(params.section);
+  const url2 = buildConverterPostUrl(params.section.host, directoryPort);
+  const res = await fetch(url2, {
+    method: "POST",
+    headers: {
+      "X-Api-Key": params.section.apiKey,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ receiver_id: params.receiverId.trim() })
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`converter_http_${res.status}: ${text.slice(0, 200)}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("converter_invalid_json");
+  }
+  const cid = parsed && typeof parsed === "object" && typeof parsed.converter_id === "string" ? parsed.converter_id.trim() : "";
+  if (!cid) {
+    throw new Error("converter_missing_converter_id");
+  }
+  return cid.toLowerCase();
 }
 
 // src/directory-api.ts
@@ -15227,12 +15261,12 @@ var chatPlugin = createChatChannelPlugin({
           section: effSection
         });
         const existing = memory.getUserConversation(targetUserId);
-        const conversationId = existing ?? crypto.randomUUID();
+        const conversationId = existing ?? await postGatewayConverter({ section: effSection, receiverId: targetUserId });
         xcConsole("info", "outbound.sendText", "step5.conversation_chosen", {
           targetUserId,
           storedConversation: existing ?? null,
           chosenConversationId: conversationId,
-          source: existing ? "memory_by_to_uuid" : "new_random_uuid"
+          source: existing ? "memory_by_to_uuid" : "gateway_converter"
         });
         memory.setUserConversation(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
@@ -15353,7 +15387,7 @@ var xcclawithChannelPlugin = {
         });
         let conversationId = extractConversationIdFromTaskPayload(p, msg);
         if (!conversationId) {
-          conversationId = crypto.randomUUID();
+          conversationId = await postGatewayConverter({ section, receiverId: userId });
           xcBoth(sink, "warn", "gateway.task", "conversation_id_synthesized", {
             eventId,
             userId,

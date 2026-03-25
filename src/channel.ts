@@ -15,6 +15,7 @@ import {
   extractTaskUserIdFromPayload,
   formatGatewayTaskDiagnostics,
 } from "./gateway-payload.js";
+import { postGatewayConverter } from "./converter-api.js";
 import { fetchGatewayDirectory } from "./directory-api.js";
 import { resolveOutboundTargetToUserId } from "./directory-resolve.js";
 import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
@@ -179,12 +180,13 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
           section: effSection,
         });
         const existing = memory.getUserConversation(targetUserId);
-        const conversationId = existing ?? crypto.randomUUID();
+        const conversationId =
+          existing ?? (await postGatewayConverter({ section: effSection, receiverId: targetUserId }));
         xcConsole("info", "outbound.sendText", "step5.conversation_chosen", {
           targetUserId,
           storedConversation: existing ?? null,
           chosenConversationId: conversationId,
-          source: existing ? "memory_by_to_uuid" : "new_random_uuid",
+          source: existing ? "memory_by_to_uuid" : "gateway_converter",
         });
         memory.setUserConversation(targetUserId, conversationId);
         xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
@@ -319,7 +321,7 @@ export const xcclawithChannelPlugin = {
         });
         let conversationId = extractConversationIdFromTaskPayload(p, msg);
         if (!conversationId) {
-          conversationId = crypto.randomUUID();
+          conversationId = await postGatewayConverter({ section, receiverId: userId });
           xcBoth(sink, "warn", "gateway.task", "conversation_id_synthesized", {
             eventId,
             userId,
