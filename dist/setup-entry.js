@@ -152,13 +152,23 @@ function extractTaskUserIdFromPayload(payload) {
 function extractConversationId(message) {
   if (!message || typeof message !== "object") return void 0;
   const m = message;
-  const c = m.conversation_id ?? m.conversationId;
-  return typeof c === "string" && c ? c : void 0;
+  const c = m.conversation_id ?? m.conversationId ?? m.converter_id ?? m.converterId ?? m.converter_uuid ?? m.converterUuid;
+  return typeof c === "string" && c.trim() ? c.trim() : void 0;
+}
+function extractConversationIdFromTaskPayload(payload, message) {
+  const fromMsg = extractConversationId(message);
+  if (fromMsg) return fromMsg;
+  const c = payload.conversation_id ?? payload.conversationId ?? payload.converter_id ?? payload.converterId ?? payload.converter_uuid ?? payload.converterUuid;
+  return typeof c === "string" && c.trim() ? c.trim() : void 0;
 }
 function extractRequiresReply(message) {
   if (!message || typeof message !== "object") return false;
   const m = message;
   return m.requires_reply === true || m.requiresReply === true;
+}
+function extractRequiresReplyFromTaskPayload(payload, message) {
+  if (payload.requires_reply === true || payload.requiresReply === true) return true;
+  return extractRequiresReply(message);
 }
 
 // src/urls.ts
@@ -300,17 +310,27 @@ async function resolveOutboundTargetToUserId(params) {
 
 // src/memory-state.ts
 var ClawithMemoryState = class {
-  /** Clawith user id -> web DM conversation_id */
+  /** Clawith users.id -> web DM conversation_id (converter) */
   userConversationIds = /* @__PURE__ */ new Map();
+  /** conversation_id -> users.id (reverse lookup) */
+  conversationUserIds = /* @__PURE__ */ new Map();
   /** OpenClaw agent id (peer) -> peer conversation_id */
   peerConversationIds = /* @__PURE__ */ new Map();
   /** OpenClaw agent id -> last new_session_id used for peer thread */
   peerNewSessionIds = /* @__PURE__ */ new Map();
   setUserConversation(userId, conversationId) {
-    this.userConversationIds.set(userId, conversationId);
+    const cid = conversationId.trim().toLowerCase();
+    const uid = userId.trim().toLowerCase();
+    const prev = this.userConversationIds.get(uid);
+    if (prev && prev !== cid) this.conversationUserIds.delete(prev);
+    this.userConversationIds.set(uid, cid);
+    this.conversationUserIds.set(cid, uid);
   }
   getUserConversation(userId) {
-    return this.userConversationIds.get(userId);
+    return this.userConversationIds.get(userId.trim().toLowerCase());
+  }
+  getUserIdForConversation(conversationId) {
+    return this.conversationUserIds.get(conversationId.trim().toLowerCase());
   }
   setPeerConversation(agentId, conversationId) {
     this.peerConversationIds.set(agentId, conversationId);
@@ -14413,6 +14433,26 @@ async function ensureXcclawithLonglinkHub(params) {
   return hub;
 }
 
+// src/session-keys.ts
+var CLAWITH_SESSION_PEER_PREFIX = "clawith-";
+function sessionPeerFromConversationId(conversationId) {
+  const c = conversationId.trim().toLowerCase();
+  return `${CLAWITH_SESSION_PEER_PREFIX}${c}`;
+}
+function parseConversationIdFromThreadOrPeer(raw) {
+  if (raw === void 0 || raw === null) return void 0;
+  const t = String(raw).trim();
+  if (!t) return void 0;
+  const lower = t.toLowerCase();
+  if (lower.startsWith(CLAWITH_SESSION_PEER_PREFIX)) {
+    const rest = t.slice(CLAWITH_SESSION_PEER_PREFIX.length).trim();
+    if (isClawithUserIdShape(rest)) return rest.toLowerCase();
+    return void 0;
+  }
+  if (isClawithUserIdShape(t)) return t.toLowerCase();
+  return void 0;
+}
+
 // src/channel.ts
 function cfgWithXcclawithDmScopeDefault(cfg) {
   if (cfg.session?.dmScope !== void 0) {
@@ -14529,17 +14569,21 @@ var chatPlugin = createChatChannelPlugin({
             `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`
           );
         }
-        const peerId = await resolveOutboundTargetToUserId({
+        const targetUserId = await resolveOutboundTargetToUserId({
           rawTo: params.to,
           section: resolveEffectiveSection(sectionParsed.data)
         });
-        const existing = memory.getUserConversation(peerId);
-        const conversationId = existing ?? crypto.randomUUID();
-        if (!existing) {
-          memory.setUserConversation(peerId, conversationId);
+        const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
+        const existing = memory.getUserConversation(targetUserId);
+        const conversationId = fromThread ?? existing ?? crypto.randomUUID();
+        if (fromThread && existing && fromThread !== existing) {
+          console.warn(
+            `[xcclawith] threadId conversation ${fromThread} overrides stored ${existing} for user ${targetUserId}`
+          );
         }
+        memory.setUserConversation(targetUserId, conversationId);
         hub.sendUserDm({
-          targetUserId: peerId,
+          targetUserId,
           content: params.text,
           conversationId
         });
@@ -14552,9 +14596,9 @@ var xcclawithChannelPlugin = {
   ...chatPlugin,
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / username / email / display_name \u2014 the plugin calls GET /api/gateway/directory and requires an exact match (case-insensitive) on username, email, or display_name among visible users.",
-      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory to disambiguate or pass user:<uuid>.",
-      "Clawith / xcclawith: For other OpenClaw bots use xcclawith_peer_message with target_agent_id from directory rows where kind is openclaw (shown as channel in some UIs)."
+      "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / email / display_name \u2014 resolved via directory exact match when not a UUID.",
+      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory or user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw)."
     ]
   },
   gateway: {
@@ -14597,9 +14641,23 @@ var xcclawithChannelPlugin = {
           return;
         }
         const text = extractTaskText(msg);
-        const convFromTask = extractConversationId(msg);
-        if (convFromTask) memory.setUserConversation(userId, convFromTask);
-        const requiresReply = extractRequiresReply(msg);
+        let conversationId = extractConversationIdFromTaskPayload(p, msg);
+        if (!conversationId) {
+          conversationId = crypto.randomUUID();
+          sink.warn(
+            `xcclawith.task_missing_conversation_id eventId=${eventId} userId=${userId} synthesized=${conversationId}`
+          );
+        } else {
+          conversationId = conversationId.trim().toLowerCase();
+        }
+        memory.setUserConversation(userId, conversationId);
+        const sessionPeerId = sessionPeerFromConversationId(conversationId);
+        const requiresReply = extractRequiresReplyFromTaskPayload(p, msg);
+        if (requiresReply) {
+          sink.debug?.(
+            `xcclawith.task_requires_reply_true eventId=${eventId} conversationId=${conversationId}`
+          );
+        }
         let accumulated = "";
         await dispatchInboundDirectDmWithRuntime({
           cfg: cfgWithXcclawithDmScopeDefault(ctx.cfg),
@@ -14608,11 +14666,11 @@ var xcclawithChannelPlugin = {
           channel: CHANNEL_ID,
           channelLabel: "Clawith",
           accountId: ctx.accountId,
-          peer: { kind: "direct", id: userId },
+          peer: { kind: "direct", id: sessionPeerId },
           senderId: userId,
           senderAddress: userId,
           recipientAddress: "xcclawith",
-          conversationLabel: `Clawith ${userId}`,
+          conversationLabel: `Clawith ${conversationId}`,
           rawBody: text,
           messageId: eventId,
           bodyForAgent: text,
@@ -14626,12 +14684,11 @@ var xcclawithChannelPlugin = {
             if (!chunk) return;
             accumulated = accumulated ? `${accumulated}
 ${chunk}` : chunk;
-            const conv = memory.getUserConversation(userId);
             hub.sendUserDm({
               targetUserId: userId,
               content: chunk,
-              conversationId: conv,
-              messageId: conv ? void 0 : eventId
+              conversationId,
+              messageId: eventId
             });
           },
           onRecordError: (err) => {
@@ -14640,12 +14697,6 @@ ${chunk}` : chunk;
           onDispatchError: (err, info) => {
             sink.error(`xcclawith.dispatch_error kind=${info.kind} ${String(err)}`);
           }
-        });
-        const sentViaUserDm = accumulated.trim().length > 0;
-        hub.sendReport({
-          messageId: eventId,
-          result: sentViaUserDm ? "" : " ",
-          requiresReply
         });
       }, ctx.abortSignal);
       hub.start();

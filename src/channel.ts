@@ -9,8 +9,8 @@ import {
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/routing";
 import { CHANNEL_ID } from "./constants.js";
 import {
-  extractConversationId,
-  extractRequiresReply,
+  extractConversationIdFromTaskPayload,
+  extractRequiresReplyFromTaskPayload,
   extractTaskText,
   extractTaskUserIdFromPayload,
 } from "./gateway-payload.js";
@@ -21,6 +21,10 @@ import { getMemory, removeHub, setHub } from "./hub-registry.js";
 import { LonglinkHub } from "./longlink-hub.js";
 import { resolveEffectiveSection, xcclawithSectionSchema, channelConfigSchema } from "./schema.js";
 import type { XcclawithSection } from "./schema.js";
+import {
+  parseConversationIdFromThreadOrPeer,
+  sessionPeerFromConversationId,
+} from "./session-keys.js";
 
 export type ResolvedXcclawith = XcclawithSection & { accountId: string };
 
@@ -28,7 +32,7 @@ export type ResolvedXcclawith = XcclawithSection & { accountId: string };
  * Core routing uses `cfg.session?.dmScope ?? "main"`, which maps every inbound DM to
  * `agent:<agentId>:main` and mixes all Clawith web users into one session.
  * When `session.dmScope` is **omitted**, we inject **`per-channel-peer`** so keys look like
- * `agent:<agentId>:xcclawith:direct:<peerId>` (channel id is {@link CHANNEL_ID}).
+ * `agent:<agentId>:xcclawith:direct:clawith-<conversation_id>` (channel id is {@link CHANNEL_ID}).
  * Any explicit `session.dmScope` in `openclaw.json` is left unchanged.
  */
 function cfgWithXcclawithDmScopeDefault(cfg: OpenClawConfig): OpenClawConfig {
@@ -154,17 +158,21 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
             `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`,
           );
         }
-        const peerId = await resolveOutboundTargetToUserId({
+        const targetUserId = await resolveOutboundTargetToUserId({
           rawTo: params.to,
           section: resolveEffectiveSection(sectionParsed.data),
         });
-        const existing = memory.getUserConversation(peerId);
-        const conversationId = existing ?? crypto.randomUUID();
-        if (!existing) {
-          memory.setUserConversation(peerId, conversationId);
+        const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
+        const existing = memory.getUserConversation(targetUserId);
+        const conversationId = fromThread ?? existing ?? crypto.randomUUID();
+        if (fromThread && existing && fromThread !== existing) {
+          console.warn(
+            `[xcclawith] threadId conversation ${fromThread} overrides stored ${existing} for user ${targetUserId}`,
+          );
         }
+        memory.setUserConversation(targetUserId, conversationId);
         hub.sendUserDm({
-          targetUserId: peerId,
+          targetUserId,
           content: params.text,
           conversationId,
         });
@@ -178,9 +186,9 @@ export const xcclawithChannelPlugin = {
   ...chatPlugin,
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / username / email / display_name — the plugin calls GET /api/gateway/directory and requires an exact match (case-insensitive) on username, email, or display_name among visible users.",
-      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory to disambiguate or pass user:<uuid>.",
-      "Clawith / xcclawith: For other OpenClaw bots use xcclawith_peer_message with target_agent_id from directory rows where kind is openclaw (shown as channel in some UIs).",
+      "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",
+      "Clawith / xcclawith: Message `to` may be user:<uuid>, bare users.id, or @username / email / display_name — resolved via directory exact match when not a UUID.",
+      "Clawith / xcclawith: If directory q returns no exact match or multiple users match, use xcclawith_directory or user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw).",
     ],
   },
   gateway: {
@@ -234,9 +242,23 @@ export const xcclawithChannelPlugin = {
           return;
         }
         const text = extractTaskText(msg);
-        const convFromTask = extractConversationId(msg);
-        if (convFromTask) memory.setUserConversation(userId, convFromTask);
-        const requiresReply = extractRequiresReply(msg);
+        let conversationId = extractConversationIdFromTaskPayload(p, msg);
+        if (!conversationId) {
+          conversationId = crypto.randomUUID();
+          sink.warn(
+            `xcclawith.task_missing_conversation_id eventId=${eventId} userId=${userId} synthesized=${conversationId}`,
+          );
+        } else {
+          conversationId = conversationId.trim().toLowerCase();
+        }
+        memory.setUserConversation(userId, conversationId);
+        const sessionPeerId = sessionPeerFromConversationId(conversationId);
+        const requiresReply = extractRequiresReplyFromTaskPayload(p, msg);
+        if (requiresReply) {
+          sink.debug?.(
+            `xcclawith.task_requires_reply_true eventId=${eventId} conversationId=${conversationId}`,
+          );
+        }
 
         let accumulated = "";
 
@@ -249,11 +271,11 @@ export const xcclawithChannelPlugin = {
           channel: CHANNEL_ID,
           channelLabel: "Clawith",
           accountId: ctx.accountId,
-          peer: { kind: "direct", id: userId },
+          peer: { kind: "direct", id: sessionPeerId },
           senderId: userId,
           senderAddress: userId,
           recipientAddress: "xcclawith",
-          conversationLabel: `Clawith ${userId}`,
+          conversationLabel: `Clawith ${conversationId}`,
           rawBody: text,
           messageId: eventId,
           bodyForAgent: text,
@@ -266,12 +288,11 @@ export const xcclawithChannelPlugin = {
             const chunk = (out.text ?? "").trim();
             if (!chunk) return;
             accumulated = accumulated ? `${accumulated}\n${chunk}` : chunk;
-            const conv = memory.getUserConversation(userId);
             hub.sendUserDm({
               targetUserId: userId,
               content: chunk,
-              conversationId: conv,
-              messageId: conv ? undefined : eventId,
+              conversationId,
+              messageId: eventId,
             });
           },
           onRecordError: (err) => {
@@ -280,14 +301,6 @@ export const xcclawithChannelPlugin = {
           onDispatchError: (err, info) => {
             sink.error(`xcclawith.dispatch_error kind=${info.kind} ${String(err)}`);
           },
-        });
-
-        // Task must still `report` to close; body already went in `clawith.user_dm` — non-empty `result` duplicates web UI.
-        const sentViaUserDm = accumulated.trim().length > 0;
-        hub.sendReport({
-          messageId: eventId,
-          result: sentViaUserDm ? "" : " ",
-          requiresReply,
         });
       }, ctx.abortSignal);
 

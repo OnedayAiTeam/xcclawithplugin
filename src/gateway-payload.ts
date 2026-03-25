@@ -143,12 +143,44 @@ export function extractTaskUserIdFromPayload(payload: Record<string, unknown>): 
 export function extractConversationId(message: unknown): string | undefined {
   if (!message || typeof message !== "object") return undefined;
   const m = message as Record<string, unknown>;
-  const c = m.conversation_id ?? m.conversationId;
-  return typeof c === "string" && c ? c : undefined;
+  const c =
+    m.conversation_id ??
+    m.conversationId ??
+    m.converter_id ??
+    m.converterId ??
+    m.converter_uuid ??
+    m.converterUuid;
+  return typeof c === "string" && c.trim() ? c.trim() : undefined;
+}
+
+/** Prefer `message`, then `gateway.task` payload root (converter / conversation). */
+export function extractConversationIdFromTaskPayload(
+  payload: Record<string, unknown>,
+  message: unknown,
+): string | undefined {
+  const fromMsg = extractConversationId(message);
+  if (fromMsg) return fromMsg;
+  const c =
+    payload.conversation_id ??
+    payload.conversationId ??
+    payload.converter_id ??
+    payload.converterId ??
+    payload.converter_uuid ??
+    payload.converterUuid;
+  return typeof c === "string" && c.trim() ? c.trim() : undefined;
 }
 
 export function extractRequiresReply(message: unknown): boolean {
   if (!message || typeof message !== "object") return false;
   const m = message as Record<string, unknown>;
   return m.requires_reply === true || m.requiresReply === true;
+}
+
+/** `gateway.task` payload: message body first, then payload root; default false. */
+export function extractRequiresReplyFromTaskPayload(
+  payload: Record<string, unknown>,
+  message: unknown,
+): boolean {
+  if (payload.requires_reply === true || payload.requiresReply === true) return true;
+  return extractRequiresReply(message);
 }
