@@ -13,19 +13,20 @@ import {
   extractRequiresReplyFromTaskPayload,
   extractTaskText,
   extractTaskUserIdFromPayload,
+  formatGatewayTaskDiagnostics,
 } from "./gateway-payload.js";
 import { fetchGatewayDirectory } from "./directory-api.js";
-import { resolveOutboundTargetToUserId } from "./directory-resolve.js";
 import { ensureXcclawithLonglinkHub } from "./ensure-longlink.js";
 import { getMemory, removeHub, setHub } from "./hub-registry.js";
 import { LonglinkHub } from "./longlink-hub.js";
-import { isClawithUserIdShape, normalizeClawithTargetUserId } from "./clawith-target.js";
+import { assertStrictClawithUserDmTarget, isClawithUserIdShape } from "./clawith-target.js";
 import { resolveEffectiveSection, xcclawithSectionSchema, channelConfigSchema } from "./schema.js";
 import type { XcclawithSection } from "./schema.js";
 import {
   parseConversationIdFromThreadOrPeer,
   sessionPeerFromConversationId,
 } from "./session-keys.js";
+import { xcBoth, xcConsole } from "./trace-log.js";
 
 export type ResolvedXcclawith = XcclawithSection & { accountId: string };
 
@@ -147,37 +148,67 @@ const chatPlugin = createChatChannelPlugin<ResolvedXcclawith>({
       channel: CHANNEL_ID,
       sendText: async (params) => {
         const accountId = normalizeAccountId(params.accountId);
+        xcConsole("info", "outbound.sendText", "step1.entry", {
+          accountId,
+          rawTo: params.to,
+          threadId: params.threadId ?? null,
+          textLen: (params.text ?? "").length,
+        });
+        xcConsole("info", "outbound.sendText", "step2.ensure_longlink", { accountId });
         const hub = await ensureXcclawithLonglinkHub({
           cfg: params.cfg,
           accountId,
           connectTimeoutMs: 25_000,
         });
+        xcConsole("info", "outbound.sendText", "step3.hub_ready", { accountId });
         const memory = getMemory(accountId);
         const sectionParsed = xcclawithSectionSchema.safeParse(readSectionRaw(params.cfg));
         if (!sectionParsed.success) {
+          xcConsole("error", "outbound.sendText", "step3b.config_invalid", {
+            issues: sectionParsed.error.issues,
+          });
           throw new Error(
             `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`,
           );
         }
-        const targetUserId = await resolveOutboundTargetToUserId({
-          rawTo: params.to,
-          section: resolveEffectiveSection(sectionParsed.data),
+        xcConsole("info", "outbound.sendText", "step4.assert_to", {
+          note: "must be users.id UUID or user:<uuid>",
         });
+        const targetUserId = assertStrictClawithUserDmTarget(params.to);
         const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
         const existing = memory.getUserConversation(targetUserId);
         const conversationId = fromThread ?? existing ?? crypto.randomUUID();
+        xcConsole("info", "outbound.sendText", "step5.conversation_chosen", {
+          targetUserId,
+          fromThread: fromThread ?? null,
+          storedConversation: existing ?? null,
+          chosenConversationId: conversationId,
+          source: fromThread ? "threadId" : existing ? "memory" : "new_random_uuid",
+        });
         if (fromThread && existing && fromThread !== existing) {
-          console.warn(
-            `[xcclawith] threadId conversation ${fromThread} overrides stored ${existing} for user ${targetUserId}`,
-          );
+          xcConsole("warn", "outbound.sendText", "step5b.thread_overrides_memory", {
+            fromThread,
+            existing,
+            targetUserId,
+          });
         }
         memory.setUserConversation(targetUserId, conversationId);
+        xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
+        xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm", {
+          note: "async ack: clawith.user_dm_ok or user_dm_failed on wire",
+        });
         hub.sendUserDm({
           targetUserId,
           content: params.text,
           conversationId,
         });
-        return { channel: CHANNEL_ID, messageId: `xcclawith-dm-${Date.now()}`, conversationId };
+        const messageId = `xcclawith-dm-${Date.now()}`;
+        xcConsole("info", "outbound.sendText", "step8.return_to_openclaw", {
+          messageId,
+          conversationId,
+          meaning: "OpenClaw may show success before Clawith ack arrives",
+        });
+        return { channel: CHANNEL_ID, messageId, conversationId };
       },
     },
   },
@@ -188,17 +219,18 @@ export const xcclawithChannelPlugin = {
   messaging: {
     targetResolver: {
       looksLikeId: (_raw: string, normalized?: string) => {
-        const s = (normalized ?? _raw).trim();
-        return isClawithUserIdShape(normalizeClawithTargetUserId(s));
+        let s = (normalized ?? _raw).trim();
+        if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
+        return isClawithUserIdShape(s.toLowerCase());
       },
-      hint: "Clawith: prefer bare users.id UUID or user:<uuid> when known; else @handle / email / display_name (directory). Thread: clawith-<conversation_id>.",
+      hint: "Clawith: message `to` must be user:<uuid> or bare users.id only (from xcclawith_directory). threadId: conversation UUID or clawith-<uuid>. Peer bots: xcclawith_peer_message + agents.id UUID.",
     },
   },
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",
-      "Clawith / xcclawith: Message `to` — if task payload, tool result, or context includes the Clawith users.id (UUID) or user:<uuid>, pass that value unchanged as `to`. Do not substitute display_name or @label when an id is available.",
-      "Clawith / xcclawith: Only when no user id is available, use @username / email / display_name (directory exact match). If lookup is ambiguous or fails, use xcclawith_directory then user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw).",
+      "Clawith / xcclawith — Before ANY user DM: call tool xcclawith_directory (GET /api/gateway/directory) with q or omit q to list; copy kind=user → id, then message with to=user:<id> or bare UUID. Names, @handles, emails are NOT accepted in `to` — the channel does not resolve them.",
+      "Clawith / xcclawith: To reach another OpenClaw: xcclawith_directory (kind=openclaw) → xcclawith_peer_message with target_agent_id = that row's id (UUID only).",
+      "Clawith / xcclawith: Session peer id is clawith-<conversation_id>. Reuse a thread via message tool threadId = that UUID (or clawith-<uuid>).",
     ],
   },
   gateway: {
@@ -211,28 +243,47 @@ export const xcclawithChannelPlugin = {
         debug: (m: string) => log?.debug?.(m),
       };
 
+      xcBoth(sink, "info", "gateway", "startAccount.entry", {
+        accountId: ctx.accountId,
+        channel: CHANNEL_ID,
+      });
+
       let parsed: ReturnType<typeof xcclawithSectionSchema.safeParse>;
       try {
         parsed = xcclawithSectionSchema.safeParse(readSectionRaw(ctx.cfg));
-      } catch {
-        sink.warn("xcclawith.config_parse_error");
+      } catch (e) {
+        xcBoth(sink, "warn", "gateway", "startAccount.config_parse_threw", { err: String(e) });
         return;
       }
       if (!parsed.success) {
-        sink.warn(`xcclawith.config_invalid ${JSON.stringify(parsed.error.issues)}`);
+        xcBoth(sink, "warn", "gateway", "startAccount.config_invalid", {
+          issues: parsed.error.issues,
+        });
         return;
       }
 
       const section = parsed.data;
+      const eff = resolveEffectiveSection(section);
+      xcBoth(sink, "info", "gateway", "startAccount.config_ok", {
+        host: eff.host,
+        longlinkPort: eff.longlinkPort,
+        directoryPort: eff.directoryPort,
+        userIdLen: eff.userId.length,
+      });
+
       const memory = getMemory(ctx.accountId);
+      xcBoth(sink, "info", "gateway", "startAccount.remove_old_hub", { accountId: ctx.accountId });
       removeHub(ctx.accountId);
 
       if (!ctx.channelRuntime) {
-        sink.warn("xcclawith.channel_runtime_missing");
+        xcBoth(sink, "warn", "gateway", "startAccount.channel_runtime_missing", {
+          meaning: "cannot dispatch inbound DMs without channelRuntime",
+        });
         return;
       }
 
       const rt = ctx.channelRuntime;
+      xcBoth(sink, "info", "gateway", "startAccount.channel_runtime_ok", {});
 
       const hub = new LonglinkHub(section, memory, sink, async ({ eventId, payload }) => {
         const p =
@@ -240,38 +291,69 @@ export const xcclawithChannelPlugin = {
             ? (payload as Record<string, unknown>)
             : ({} as Record<string, unknown>);
         const msg = p.message;
+        xcBoth(sink, "info", "gateway.task", "received", {
+          eventId,
+          diagnostics: formatGatewayTaskDiagnostics(p),
+        });
         const userId = extractTaskUserIdFromPayload(p);
         if (!userId) {
           const messageKeys =
             msg && typeof msg === "object" && !Array.isArray(msg)
               ? Object.keys(msg as Record<string, unknown>).join(",")
               : typeof msg;
-          sink.warn(
-            `xcclawith.task_missing_user eventId=${eventId} payloadKeys=${Object.keys(p).join(",")} messageKeys=${messageKeys}`,
-          );
+          xcBoth(sink, "warn", "gateway.task", "missing_user_id", {
+            eventId,
+            payloadKeys: Object.keys(p).join(","),
+            messageKeys,
+            meaning: "extractTaskUserIdFromPayload found nothing; check Clawith payload shape",
+          });
           return;
         }
+        xcBoth(sink, "info", "gateway.task", "user_id_resolved", { eventId, userId });
         const text = extractTaskText(msg);
+        xcBoth(sink, "info", "gateway.task", "text_extracted", {
+          eventId,
+          textLen: text.length,
+          preview: text.slice(0, 120),
+        });
         let conversationId = extractConversationIdFromTaskPayload(p, msg);
         if (!conversationId) {
           conversationId = crypto.randomUUID();
-          sink.warn(
-            `xcclawith.task_missing_conversation_id eventId=${eventId} userId=${userId} synthesized=${conversationId}`,
-          );
+          xcBoth(sink, "warn", "gateway.task", "conversation_id_synthesized", {
+            eventId,
+            userId,
+            conversationId,
+            meaning: "no converter/conversation on payload; new thread key for OpenClaw",
+          });
         } else {
           conversationId = conversationId.trim().toLowerCase();
+          xcBoth(sink, "info", "gateway.task", "conversation_id_from_payload", {
+            eventId,
+            conversationId,
+          });
         }
         memory.setUserConversation(userId, conversationId);
         const sessionPeerId = sessionPeerFromConversationId(conversationId);
         const requiresReply = extractRequiresReplyFromTaskPayload(p, msg);
+        xcBoth(sink, "info", "gateway.task", "session_mapping", {
+          eventId,
+          userId,
+          conversationId,
+          sessionPeerId,
+          requiresReply,
+        });
         if (requiresReply) {
           sink.debug?.(
-            `xcclawith.task_requires_reply_true eventId=${eventId} conversationId=${conversationId}`,
+            `[xcclawith][gateway.task] requires_reply=true eventId=${eventId} conversationId=${conversationId}`,
           );
         }
 
         let accumulated = "";
 
+        xcBoth(sink, "info", "gateway.task", "dispatchInbound.begin", {
+          eventId,
+          sessionPeerId,
+        });
         await dispatchInboundDirectDmWithRuntime({
           cfg: cfgWithXcclawithDmScopeDefault(ctx.cfg),
           // Gateway passes `channelRuntime` = PluginRuntime["channel"]; dispatch expects `{ channel: that }`.
@@ -296,8 +378,18 @@ export const xcclawithChannelPlugin = {
           originatingTo: userId,
           deliver: async (out) => {
             const chunk = (out.text ?? "").trim();
-            if (!chunk) return;
+            if (!chunk) {
+              xcBoth(sink, "debug", "gateway.deliver", "skip_empty_chunk", { eventId });
+              return;
+            }
             accumulated = accumulated ? `${accumulated}\n${chunk}` : chunk;
+            xcBoth(sink, "info", "gateway.deliver", "outbound_chunk", {
+              eventId,
+              userId,
+              conversationId,
+              chunkLen: chunk.length,
+              accumulatedLen: accumulated.length,
+            });
             hub.sendUserDm({
               targetUserId: userId,
               content: chunk,
@@ -306,23 +398,37 @@ export const xcclawithChannelPlugin = {
             });
           },
           onRecordError: (err) => {
-            sink.error(`xcclawith.record_inbound_session_error ${String(err)}`);
+            xcBoth(sink, "error", "gateway.dispatch", "record_inbound_session_error", {
+              err: String(err),
+            });
           },
           onDispatchError: (err, info) => {
-            sink.error(`xcclawith.dispatch_error kind=${info.kind} ${String(err)}`);
+            xcBoth(sink, "error", "gateway.dispatch", "dispatch_error", {
+              kind: info.kind,
+              err: String(err),
+            });
           },
+        });
+        xcBoth(sink, "info", "gateway.task", "dispatchInbound.end", {
+          eventId,
+          accumulatedLen: accumulated.length,
         });
       }, ctx.abortSignal);
 
       hub.start();
       setHub(ctx.accountId, hub);
-      sink.info(`xcclawith.gateway_started accountId=${ctx.accountId}`);
+      xcBoth(sink, "info", "gateway", "startAccount.longlink_started", {
+        accountId: ctx.accountId,
+        meaning: "blocking on abort signal",
+      });
 
       await untilAbort(ctx.abortSignal);
+      xcBoth(sink, "info", "gateway", "startAccount.abort_wait_done", { accountId: ctx.accountId });
     },
     stopAccount: async (ctx: ChannelGatewayContext<ResolvedXcclawith>) => {
+      xcBoth(ctx.log, "info", "gateway", "stopAccount.entry", { accountId: ctx.accountId });
       removeHub(ctx.accountId);
-      ctx.log?.info?.(`xcclawith.gateway_stopped accountId=${ctx.accountId}`);
+      xcBoth(ctx.log, "info", "gateway", "stopAccount.hub_removed", { accountId: ctx.accountId });
     },
   },
   directory: {
@@ -336,10 +442,25 @@ export const xcclawithChannelPlugin = {
       const { cfg, accountId, query, limit } = params;
       const acc = resolveAccount(cfg, accountId);
       const eff = resolveEffectiveSection(acc);
+      xcConsole("info", "directory.listPeersLive", "request", {
+        accountId: acc.accountId,
+        q: query ?? null,
+        limit: limit ?? null,
+        host: eff.host,
+      });
       const res = await fetchGatewayDirectory({
         section: eff,
         q: query ?? undefined,
         limit: limit ?? undefined,
+        log: {
+          info: (m) => console.info(m),
+          debug: (m) => console.debug(m),
+        },
+      });
+      xcConsole("info", "directory.listPeersLive", "mapped", {
+        rows: res.items.length,
+        users: res.items.filter((i) => i.kind === "user").length,
+        openclaw: res.items.filter((i) => i.kind === "openclaw").length,
       });
       return res.items.map((it) => ({
         kind: it.kind === "openclaw" ? ("channel" as const) : ("user" as const),

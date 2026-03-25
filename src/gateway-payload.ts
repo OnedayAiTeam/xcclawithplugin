@@ -184,3 +184,36 @@ export function extractRequiresReplyFromTaskPayload(
   if (payload.requires_reply === true || payload.requiresReply === true) return true;
   return extractRequiresReply(message);
 }
+
+/**
+ * One-line summary for logs: what we could read from a `gateway.task` payload (for debugging missing user / conversation).
+ */
+export function formatGatewayTaskDiagnostics(payload: Record<string, unknown>): string {
+  const msg = payload.message;
+  const uid = extractTaskUserIdFromPayload(payload);
+  const conv = extractConversationIdFromTaskPayload(payload, msg);
+  const req = extractRequiresReplyFromTaskPayload(payload, msg);
+  const txt = extractTaskText(msg);
+  const rel = payload.relationships;
+  const relHint =
+    rel === undefined
+      ? "absent"
+      : Array.isArray(rel)
+        ? `array(len=${rel.length})`
+        : typeof rel === "object"
+          ? `object(keys=${Object.keys(rel as object).join(",")})`
+          : typeof rel;
+  const msgKeys =
+    msg && typeof msg === "object" && !Array.isArray(msg)
+      ? Object.keys(msg as Record<string, unknown>).join(",")
+      : typeof msg;
+  return [
+    `payloadKeys=${Object.keys(payload).join(",")}`,
+    `relationships=${relHint}`,
+    `messageKeys=${msgKeys}`,
+    `resolvedUserId=${uid ?? "NONE"}`,
+    `resolvedConversationId=${conv ?? "NONE"}`,
+    `requiresReply=${req}`,
+    `textLen=${txt.length}`,
+  ].join(" | ");
+}

@@ -170,40 +170,146 @@ function extractRequiresReplyFromTaskPayload(payload, message) {
   if (payload.requires_reply === true || payload.requiresReply === true) return true;
   return extractRequiresReply(message);
 }
+function formatGatewayTaskDiagnostics(payload) {
+  const msg = payload.message;
+  const uid = extractTaskUserIdFromPayload(payload);
+  const conv = extractConversationIdFromTaskPayload(payload, msg);
+  const req = extractRequiresReplyFromTaskPayload(payload, msg);
+  const txt = extractTaskText(msg);
+  const rel = payload.relationships;
+  const relHint = rel === void 0 ? "absent" : Array.isArray(rel) ? `array(len=${rel.length})` : typeof rel === "object" ? `object(keys=${Object.keys(rel).join(",")})` : typeof rel;
+  const msgKeys = msg && typeof msg === "object" && !Array.isArray(msg) ? Object.keys(msg).join(",") : typeof msg;
+  return [
+    `payloadKeys=${Object.keys(payload).join(",")}`,
+    `relationships=${relHint}`,
+    `messageKeys=${msgKeys}`,
+    `resolvedUserId=${uid ?? "NONE"}`,
+    `resolvedConversationId=${conv ?? "NONE"}`,
+    `requiresReply=${req}`,
+    `textLen=${txt.length}`
+  ].join(" | ");
+}
+
+// src/trace-log.ts
+function fmt(v) {
+  if (v === void 0) return "undefined";
+  if (v === null) return "null";
+  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try {
+    const s = JSON.stringify(v);
+    return s.length > 800 ? `${s.slice(0, 800)}\u2026(trunc)` : s;
+  } catch {
+    return String(v);
+  }
+}
+function xcLine(phase, action, fields) {
+  if (!fields || !Object.keys(fields).length) {
+    return `[xcclawith][${phase}] ${action}`;
+  }
+  const kv = Object.entries(fields).map(([k, v]) => `${k}=${fmt(v)}`).join(" ");
+  return `[xcclawith][${phase}] ${action} | ${kv}`;
+}
+function xcConsole(level, phase, action, fields) {
+  const line = xcLine(phase, action, fields);
+  switch (level) {
+    case "debug":
+      console.debug(line);
+      break;
+    case "info":
+      console.info(line);
+      break;
+    case "warn":
+      console.warn(line);
+      break;
+    case "error":
+      console.error(line);
+      break;
+  }
+}
+function xcBoth(sink, level, phase, action, fields) {
+  const line = xcLine(phase, action, fields);
+  switch (level) {
+    case "debug":
+      sink?.debug?.(line);
+      console.debug(line);
+      break;
+    case "info":
+      sink?.info?.(line);
+      console.info(line);
+      break;
+    case "warn":
+      sink?.warn?.(line);
+      console.warn(line);
+      break;
+    case "error":
+      sink?.error?.(line);
+      console.error(line);
+      break;
+  }
+}
 
 // src/urls.ts
 function normalizeHost(raw) {
   const t = raw.trim();
-  if (!t) return t;
+  if (!t) {
+    xcConsole("warn", "urls", "normalizeHost.empty_input", {});
+    return t;
+  }
   const lower = t.toLowerCase();
   if (lower.startsWith("https://")) {
-    return t.slice("https://".length).split("/")[0] ?? t;
+    const out2 = t.slice("https://".length).split("/")[0] ?? t;
+    xcConsole("debug", "urls", "normalizeHost.stripped_scheme", { scheme: "https", out: out2 });
+    return out2;
   }
   if (lower.startsWith("http://")) {
-    return t.slice("http://".length).split("/")[0] ?? t;
+    const out2 = t.slice("http://".length).split("/")[0] ?? t;
+    xcConsole("debug", "urls", "normalizeHost.stripped_scheme", { scheme: "http", out: out2 });
+    return out2;
   }
   if (lower.startsWith("wss://")) {
-    return t.slice("wss://".length).split("/")[0] ?? t;
+    const out2 = t.slice("wss://".length).split("/")[0] ?? t;
+    xcConsole("debug", "urls", "normalizeHost.stripped_scheme", { scheme: "wss", out: out2 });
+    return out2;
   }
   if (lower.startsWith("ws://")) {
-    return t.slice("ws://".length).split("/")[0] ?? t;
+    const out2 = t.slice("ws://".length).split("/")[0] ?? t;
+    xcConsole("debug", "urls", "normalizeHost.stripped_scheme", { scheme: "ws", out: out2 });
+    return out2;
   }
-  return t.split("/")[0] ?? t;
+  const out = t.split("/")[0] ?? t;
+  xcConsole("debug", "urls", "normalizeHost.no_scheme", { out });
+  return out;
 }
 function buildDirectoryBaseUrl(host, directoryPort) {
   const h = normalizeHost(host);
-  return `http://${h}:${directoryPort}${DIRECTORY_HTTP_PATH}`;
+  const url2 = `http://${h}:${directoryPort}${DIRECTORY_HTTP_PATH}`;
+  xcConsole("info", "urls", "buildDirectoryBaseUrl", { hostNorm: h, directoryPort, path: DIRECTORY_HTTP_PATH });
+  return url2;
 }
 function buildLonglinkWsUrl(host, longlinkPort, apiKey, userId) {
   const h = normalizeHost(host);
   const q = new URLSearchParams({ apiKey, userId });
-  return `ws://${h}:${longlinkPort}${LONGLINK_WS_PATH}?${q.toString()}`;
+  const url2 = `ws://${h}:${longlinkPort}${LONGLINK_WS_PATH}?${q.toString()}`;
+  xcConsole("info", "urls", "buildLonglinkWsUrl", {
+    hostNorm: h,
+    longlinkPort,
+    path: LONGLINK_WS_PATH,
+    userIdLen: userId.length,
+    apiKeyLen: apiKey.length
+  });
+  return url2;
 }
 function resolvePorts(section) {
-  return {
-    directoryPort: section.directoryPort ?? DEFAULT_DIRECTORY_PORT,
-    longlinkPort: section.longlinkPort ?? DEFAULT_LONGLINK_PORT
-  };
+  const directoryPort = section.directoryPort ?? DEFAULT_DIRECTORY_PORT;
+  const longlinkPort = section.longlinkPort ?? DEFAULT_LONGLINK_PORT;
+  xcConsole("debug", "urls", "resolvePorts", {
+    directoryPort,
+    longlinkPort,
+    fromSectionDir: section.directoryPort !== void 0,
+    fromSectionLl: section.longlinkPort !== void 0
+  });
+  return { directoryPort, longlinkPort };
 }
 
 // src/directory-api.ts
@@ -218,102 +324,60 @@ async function fetchGatewayDirectory(params) {
   const url2 = new URL(base2);
   const q = params.q?.trim();
   if (q) url2.searchParams.set("q", q);
-  url2.searchParams.set("limit", String(clampLimit(params.limit)));
-  params.log?.debug?.(`directory.request url=${url2.toString()} hasQ=${Boolean(q)}`);
+  const lim = clampLimit(params.limit);
+  url2.searchParams.set("limit", String(lim));
+  params.log?.info?.(
+    `directory.request host=${section.host} port=${directoryPort} hasQ=${Boolean(q)} qLen=${q?.length ?? 0} limit=${lim}`
+  );
+  params.log?.debug?.(`directory.request url=${url2.toString()}`);
+  xcConsole("info", "directory.http", "fetch.begin", {
+    host: section.host,
+    port: directoryPort,
+    hasQ: Boolean(q),
+    limit: lim,
+    apiKeyLen: section.apiKey?.length ?? 0
+  });
   const res = await fetch(url2.toString(), {
     method: "GET",
     headers: { "X-Api-Key": section.apiKey }
   });
   const text = await res.text();
+  xcConsole("info", "directory.http", "fetch.response", {
+    status: res.status,
+    ok: res.ok,
+    bodyChars: text.length
+  });
   if (!res.ok) {
     params.log?.debug?.(`directory.error status=${res.status} bodyPreview=${text.slice(0, 500)}`);
+    xcConsole("error", "directory.http", "fetch.http_error", {
+      status: res.status,
+      bodyPreview: text.slice(0, 400),
+      meaning: "Clawith directory HTTP rejected request; check host, directoryPort, X-Api-Key"
+    });
     throw new Error(`directory_http_${res.status}: ${text.slice(0, 200)}`);
   }
   let parsed;
   try {
     parsed = JSON.parse(text);
-  } catch {
+  } catch (e) {
+    xcConsole("error", "directory.http", "parse.json_failed", {
+      bodyPreview: text.slice(0, 400),
+      err: String(e)
+    });
     throw new Error("directory_invalid_json");
   }
   const items = parsed?.items;
   if (!Array.isArray(items)) {
+    xcConsole("error", "directory.http", "parse.missing_items_array", {
+      parsedTopKeys: parsed && typeof parsed === "object" ? Object.keys(parsed).join(",") : typeof parsed
+    });
     throw new Error("directory_missing_items");
   }
+  const userN = items.filter((i) => i.kind === "user").length;
+  const botN = items.filter((i) => i.kind === "openclaw").length;
+  params.log?.info?.(`directory.ok total=${items.length} kind_user=${userN} kind_openclaw=${botN}`);
   params.log?.debug?.(`directory.ok count=${items.length}`);
   return { items };
-}
-
-// src/clawith-target.ts
-var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var UUID_GLOBAL = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
-function normalizeClawithTargetUserId(raw) {
-  let s = raw.trim();
-  if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
-  const hits = s.match(UUID_GLOBAL);
-  if (!hits?.length) return s;
-  if (hits.length === 1) return hits[0].toLowerCase();
-  return hits[hits.length - 1].toLowerCase();
-}
-function isClawithUserIdShape(s) {
-  return UUID.test(s);
-}
-
-// src/directory-resolve.ts
-function stripAtHandle(s) {
-  return s.trim().replace(/^@+/, "").trim();
-}
-function exactMatchUserRow(item, needleRaw) {
-  if (item.kind !== "user") return false;
-  const needle = needleRaw.trim().toLowerCase();
-  if (!needle) return false;
-  const u = (item.username ?? "").trim().toLowerCase();
-  if (u === needle) return true;
-  const eFull = (item.email ?? "").trim().toLowerCase();
-  if (eFull === needle) return true;
-  if (!needle.includes("@") && eFull.includes("@")) {
-    const local = eFull.split("@")[0] ?? "";
-    if (local === needle) return true;
-  }
-  const d = (item.display_name ?? "").trim().toLowerCase();
-  if (d === needle) return true;
-  if (d.length > 0 && needle.startsWith(d) && needle.length > d.length) {
-    const rest = needle.slice(d.length);
-    if (rest.startsWith(" ") || rest.startsWith("-") || rest.startsWith(" -")) return true;
-  }
-  return false;
-}
-function pickExactUsers(items, needle) {
-  return items.filter((i) => exactMatchUserRow(i, needle));
-}
-async function resolveOutboundTargetToUserId(params) {
-  const normalized = normalizeClawithTargetUserId(params.rawTo);
-  if (isClawithUserIdShape(normalized)) return normalized;
-  const needle = stripAtHandle(params.rawTo);
-  if (!needle) {
-    throw new Error("xcclawith_empty_target");
-  }
-  const { items } = await fetchGatewayDirectory({
-    section: params.section,
-    q: needle,
-    limit: 50,
-    log: params.log
-  });
-  const users = items.filter((i) => i.kind === "user");
-  let matches = pickExactUsers(items, needle);
-  if (matches.length === 0 && users.length === 1) {
-    matches = [users[0]];
-  }
-  if (matches.length === 1) {
-    return matches[0].id;
-  }
-  if (matches.length === 0) {
-    throw new Error(
-      `xcclawith_no_exact_directory_match to=${JSON.stringify(params.rawTo)} q=${JSON.stringify(needle)} \u2014 no resolvable kind=user row; use xcclawith_directory or user:<uuid>.`
-    );
-  }
-  throw new Error(
-    `xcclawith_ambiguous_directory_match to=${JSON.stringify(params.rawTo)} count=${matches.length} \u2014 use user:<uuid>.`
-  );
 }
 
 // src/memory-state.ts
@@ -330,7 +394,17 @@ var ClawithMemoryState = class {
     const cid = conversationId.trim().toLowerCase();
     const uid = userId.trim().toLowerCase();
     const prev = this.userConversationIds.get(uid);
-    if (prev && prev !== cid) this.conversationUserIds.delete(prev);
+    if (prev && prev !== cid) {
+      xcConsole("info", "memory", "userConversation.remap", {
+        userId: uid,
+        previousConversationId: prev,
+        newConversationId: cid,
+        reason: "binding changed for same user"
+      });
+      this.conversationUserIds.delete(prev);
+    } else {
+      xcConsole("debug", "memory", "userConversation.set", { userId: uid, conversationId: cid });
+    }
     this.userConversationIds.set(uid, cid);
     this.conversationUserIds.set(cid, uid);
   }
@@ -341,12 +415,14 @@ var ClawithMemoryState = class {
     return this.conversationUserIds.get(conversationId.trim().toLowerCase());
   }
   setPeerConversation(agentId, conversationId) {
+    xcConsole("info", "memory", "peerConversation.set", { agentId, conversationId });
     this.peerConversationIds.set(agentId, conversationId);
   }
   getPeerConversation(agentId) {
     return this.peerConversationIds.get(agentId);
   }
   setPeerNewSession(agentId, sessionId) {
+    xcConsole("info", "memory", "peerNewSession.set", { agentId, sessionId });
     this.peerNewSessionIds.set(agentId, sessionId);
   }
   getPeerNewSession(agentId) {
@@ -366,19 +442,28 @@ function getMemory(accountId) {
   if (!m) {
     m = new ClawithMemoryState();
     memories.set(k, m);
+    xcConsole("info", "registry", "memory.created", { key: k });
   }
   return m;
 }
 function setHub(accountId, hub) {
-  hubs.set(hubKey(accountId), hub);
+  const k = hubKey(accountId);
+  xcConsole("info", "registry", "hub.register", { key: k });
+  hubs.set(k, hub);
 }
 function getHub(accountId) {
-  return hubs.get(hubKey(accountId));
+  const k = hubKey(accountId);
+  const h = hubs.get(k);
+  xcConsole("info", "registry", "hub.get", { key: k, hit: h !== void 0 });
+  return h;
 }
 function removeHub(accountId) {
   const k = hubKey(accountId);
+  const had = hubs.has(k);
+  xcConsole("info", "registry", "hub.remove.begin", { key: k, hadHub: had });
   hubs.get(k)?.stop();
   hubs.delete(k);
+  xcConsole("info", "registry", "hub.remove.done", { key: k });
 }
 
 // src/longlink-hub.ts
@@ -14179,6 +14264,15 @@ var LonglinkHub = class {
     this.onGatewayTask = onGatewayTask;
     this.abortSignal = abortSignal;
     this.eff = resolveEffectiveSection(_section);
+    this.log.info(
+      xcLine("longlink.hub", "constructor", {
+        host: this.eff.host,
+        longlinkPort: this.eff.longlinkPort,
+        directoryPort: this.eff.directoryPort,
+        userIdLen: this.eff.userId.length,
+        apiKeyLen: this.eff.apiKey.length
+      })
+    );
   }
   ws = null;
   reconnectTimer = null;
@@ -14186,10 +14280,12 @@ var LonglinkHub = class {
   eff;
   start() {
     this.stopped = false;
+    this.log.info(xcLine("longlink.hub", "start", { note: "connect() scheduled, abort listener registered" }));
     this.connect();
     this.abortSignal.addEventListener(
       "abort",
       () => {
+        this.log.warn(xcLine("longlink.hub", "abort_signal", { action: "stop()" }));
         this.stop();
       },
       { once: true }
@@ -14200,46 +14296,88 @@ var LonglinkHub = class {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+      this.log.info(xcLine("longlink.hub", "stop.cleared_reconnect_timer", {}));
     }
     if (this.ws) {
       try {
+        const rs = this.ws.readyState;
+        this.log.info(xcLine("longlink.hub", "stop.closing_ws", { readyState: rs }));
         this.ws.close();
-      } catch {
+      } catch (e) {
+        this.log.warn(xcLine("longlink.hub", "stop.ws_close_error", { err: String(e) }));
       }
       this.ws = null;
     }
-    this.log.info("longlink.stopped");
+    this.log.info(xcLine("longlink.hub", "stop.complete", { meaning: "no more reconnects until start()" }));
   }
   scheduleReconnect(ms) {
-    if (this.stopped) return;
+    if (this.stopped) {
+      this.log.debug?.(xcLine("longlink.hub", "reconnect.skipped_stopped", { ms }));
+      return;
+    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.log.warn(
+      xcLine("longlink.hub", "reconnect.scheduled", {
+        delayMs: ms,
+        reason: "socket closed or failed; will call connect() again"
+      })
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
     }, ms);
   }
   connect() {
-    if (this.stopped) return;
+    if (this.stopped) {
+      this.log.debug?.(xcLine("longlink.hub", "connect.skipped_stopped", {}));
+      return;
+    }
     const url2 = buildLonglinkWsUrl(
       this.eff.host,
       this.eff.longlinkPort,
       this.eff.apiKey,
       this.eff.userId
     );
-    this.log.info(`longlink.connecting url=${scrubUrl(url2)}`);
+    this.log.info(
+      xcLine("longlink.ws", "connect.attempt", {
+        scrubbedUrl: scrubUrl(url2),
+        meaning: "opening WebSocket to Clawith longlink"
+      })
+    );
     const ws = new WebSocket(url2);
     this.ws = ws;
     ws.on("open", () => {
-      this.log.info("longlink.open");
+      this.log.info(
+        xcLine("longlink.ws", "open", {
+          readyState: ws.readyState,
+          meaning: "TLS/WS handshake ok; can send clawith.user_dm / peer_message"
+        })
+      );
     });
     ws.on("message", (data) => {
-      void this.handleRawMessage(String(data));
+      const raw = String(data);
+      this.log.debug?.(
+        xcLine("longlink.ws", "message.raw", { chars: raw.length, preview: raw.slice(0, 120) })
+      );
+      void this.handleRawMessage(raw);
     });
     ws.on("error", (err) => {
-      this.log.error(`longlink.ws_error ${String(err)}`);
+      this.log.error(
+        xcLine("longlink.ws", "socket_error", {
+          err: String(err),
+          meaning: "network/TLS error; close event usually follows"
+        })
+      );
     });
     ws.on("close", (code, reason) => {
-      this.log.warn(`longlink.close code=${code} reason=${reason.toString()}`);
+      this.log.warn(
+        xcLine("longlink.ws", "close", {
+          code,
+          reason: reason.toString(),
+          stopped: this.stopped,
+          meaning: this.stopped ? "expected after stop()" : "connection lost; scheduling reconnect"
+        })
+      );
       this.ws = null;
       if (!this.stopped) this.scheduleReconnect(3e3);
     });
@@ -14248,32 +14386,88 @@ var LonglinkHub = class {
     let frame;
     try {
       frame = JSON.parse(raw);
-    } catch {
-      this.log.warn(`longlink.json_parse_error preview=${raw.slice(0, 200)}`);
+    } catch (e) {
+      this.log.warn(
+        xcLine("longlink.rx", "json_parse_error", {
+          preview: raw.slice(0, 200),
+          err: String(e),
+          meaning: "server sent non-JSON; ignored"
+        })
+      );
       return;
     }
     const t = frame.type;
-    this.log.debug?.(`longlink.frame type=${t} id=${frame.id ?? ""}`);
+    this.log.debug?.(
+      xcLine("longlink.rx", "frame.parsed", {
+        type: t,
+        id: frame.id ?? null,
+        ts: frame.ts ?? null
+      })
+    );
     if (t === "session.ready") {
-      this.log.info(`longlink.session_ready id=${frame.id ?? ""}`);
+      this.log.info(xcLine("longlink.rx", "session.ready.top_level", { frameId: frame.id ?? "" }));
       return;
     }
     if (t === "heartbeat" || t === "ping" || t === "pong" || t === "ack") {
+      this.log.debug?.(xcLine("longlink.rx", "control_frame_ignored", { type: t }));
       return;
     }
-    if (t === "event" && frame.payload && typeof frame.payload === "object") {
+    if (t !== "event") {
+      this.log.warn(
+        xcLine("longlink.rx", "unknown_frame_type", {
+          type: t,
+          id: frame.id,
+          meaning: "not handled by xcclawith; check Clawith protocol version"
+        })
+      );
+      return;
+    }
+    if (frame.payload && typeof frame.payload === "object") {
       const src = frame.payload.source;
+      const payloadKeys = Object.keys(frame.payload).join(",");
+      this.log.info(
+        xcLine("longlink.rx", "event", {
+          source: String(src),
+          eventFrameId: frame.id ?? "",
+          payloadKeys
+        })
+      );
       if (src === "session.ready") {
-        this.log.info(`longlink.session_ready id=${frame.id ?? ""}`);
+        this.log.info(xcLine("longlink.rx", "session.ready.in_event", { frameId: frame.id ?? "" }));
         return;
       }
       const eventId = frame.id;
       if (typeof eventId !== "string" || !eventId) {
-        this.log.warn(`longlink.event_missing_id source=${String(src)}`);
+        this.log.warn(
+          xcLine("longlink.rx", "event.missing_event_id", {
+            source: String(src),
+            meaning: "cannot correlate; gateway.task dispatch skipped"
+          })
+        );
         return;
       }
       if (src === "gateway.task") {
-        await this.onGatewayTask({ eventId, payload: frame.payload });
+        this.log.info(
+          xcLine("longlink.rx", "gateway.task.dispatch_begin", {
+            eventId,
+            payloadKeys
+          })
+        );
+        try {
+          await this.onGatewayTask({ eventId, payload: frame.payload });
+          this.log.info(
+            xcLine("longlink.rx", "gateway.task.dispatch_end", { eventId, status: "ok" })
+          );
+        } catch (e) {
+          this.log.error(
+            xcLine("longlink.rx", "gateway.task.dispatch_end", {
+              eventId,
+              status: "error",
+              err: String(e),
+              meaning: "handler threw; error logged, longlink stays up"
+            })
+          );
+        }
         return;
       }
       if (src === "clawith.user_dm_ok") {
@@ -14281,7 +14475,21 @@ var LonglinkHub = class {
         const uid = frame.payload.target_user_id;
         if (typeof cid === "string" && typeof uid === "string") {
           this.memory.setUserConversation(uid, cid);
-          this.log.debug?.(`longlink.user_dm_ok userId=${uid} conversationId=${cid}`);
+          this.log.info(
+            xcLine("longlink.rx", "user_dm_ok", {
+              target_user_id: uid,
+              conversation_id: cid,
+              meaning: "Clawith accepted outbound user_dm; memory updated"
+            })
+          );
+        } else {
+          this.log.warn(
+            xcLine("longlink.rx", "user_dm_ok.malformed", {
+              hasCid: typeof cid === "string",
+              hasUid: typeof uid === "string",
+              payloadKeys
+            })
+          );
         }
         return;
       }
@@ -14290,7 +14498,13 @@ var LonglinkHub = class {
         const tid = frame.payload.target_user_id;
         const cid = frame.payload.conversation_id;
         this.log.warn(
-          `longlink.user_dm_failed message=${msg}` + (typeof tid === "string" ? ` target_user_id=${tid}` : "") + (typeof cid === "string" ? ` conversation_id=${cid}` : "")
+          xcLine("longlink.rx", "user_dm_failed", {
+            message: msg,
+            target_user_id: typeof tid === "string" ? tid : null,
+            conversation_id: typeof cid === "string" ? cid : null,
+            payloadKeys,
+            meaning: msg.includes("not found") || msg.includes("Not found") ? "users.id unknown to gateway or not visible to this bot" : "see message from Clawith"
+          })
         );
         return;
       }
@@ -14299,16 +14513,46 @@ var LonglinkHub = class {
         const aid = frame.payload.target_agent_id;
         if (typeof cid === "string" && typeof aid === "string") {
           this.memory.setPeerConversation(aid, cid);
-          this.log.debug?.(`longlink.peer_ok agentId=${aid} conversationId=${cid}`);
+          this.log.info(
+            xcLine("longlink.rx", "peer_message_ok", {
+              target_agent_id: aid,
+              conversation_id: cid
+            })
+          );
+        } else {
+          this.log.warn(
+            xcLine("longlink.rx", "peer_message_ok.malformed", { payloadKeys })
+          );
         }
         return;
       }
       if (src === "clawith.peer_message_failed") {
         this.log.warn(
-          `longlink.peer_failed message=${String(frame.payload.message)} code=${String(frame.payload.code)} http=${String(frame.payload.httpStatus)} retry_after=${String(frame.payload.retry_after_seconds)}`
+          xcLine("longlink.rx", "peer_message_failed", {
+            message: String(frame.payload.message),
+            code: String(frame.payload.code),
+            httpStatus: String(frame.payload.httpStatus),
+            retry_after_seconds: String(frame.payload.retry_after_seconds),
+            payloadKeys
+          })
         );
         return;
       }
+      this.log.warn(
+        xcLine("longlink.rx", "event.unhandled_source", {
+          source: String(src),
+          eventId,
+          payloadKeys,
+          meaning: "add handler in longlink-hub if this source is expected"
+        })
+      );
+    } else {
+      this.log.warn(
+        xcLine("longlink.rx", "event.bad_payload", {
+          type: t,
+          meaning: "type=event but payload missing or not object"
+        })
+      );
     }
   }
   /**
@@ -14318,11 +14562,27 @@ var LonglinkHub = class {
   waitForOpen(timeoutMs) {
     const ws = this.ws;
     if (!ws) {
+      this.log.error(
+        xcLine("longlink.ws", "waitForOpen.reject", {
+          reason: "no_socket",
+          meaning: "connect() not run yet or stop() cleared ws"
+        })
+      );
       return Promise.reject(new Error("xcclawith_longlink_no_socket"));
     }
     if (ws.readyState === WebSocket.OPEN) {
+      this.log.debug?.(
+        xcLine("longlink.ws", "waitForOpen.already_open", { readyState: ws.readyState })
+      );
       return Promise.resolve();
     }
+    this.log.info(
+      xcLine("longlink.ws", "waitForOpen.blocking", {
+        readyState: ws.readyState,
+        timeoutMs,
+        meaning: "0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED"
+      })
+    );
     return new Promise((resolve, reject) => {
       let settled = false;
       const finish = (fn) => {
@@ -14335,13 +14595,28 @@ var LonglinkHub = class {
         fn();
       };
       const timer = setTimeout(() => {
-        finish(
-          () => reject(new Error(`xcclawith_longlink_connect_timeout_${timeoutMs}ms`))
-        );
+        finish(() => {
+          this.log.error(
+            xcLine("longlink.ws", "waitForOpen.timeout", {
+              timeoutMs,
+              readyState: ws.readyState
+            })
+          );
+          reject(new Error(`xcclawith_longlink_connect_timeout_${timeoutMs}ms`));
+        });
       }, timeoutMs);
-      const onOpen = () => finish(() => resolve());
-      const onErr = () => finish(() => reject(new Error("xcclawith_longlink_ws_error")));
-      const onClose = () => finish(() => reject(new Error("xcclawith_longlink_ws_closed_before_open")));
+      const onOpen = () => finish(() => {
+        this.log.info(xcLine("longlink.ws", "waitForOpen.resolved_open", {}));
+        resolve();
+      });
+      const onErr = () => finish(() => {
+        this.log.error(xcLine("longlink.ws", "waitForOpen.resolved_error", {}));
+        reject(new Error("xcclawith_longlink_ws_error"));
+      });
+      const onClose = () => finish(() => {
+        this.log.error(xcLine("longlink.ws", "waitForOpen.resolved_close_before_open", {}));
+        reject(new Error("xcclawith_longlink_ws_closed_before_open"));
+      });
       ws.on("open", onOpen);
       ws.on("error", onErr);
       ws.on("close", onClose);
@@ -14352,11 +14627,24 @@ var LonglinkHub = class {
   }
   send(obj) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.log.warn(`longlink.send_skipped_not_open type=${String(obj.type)}`);
+      this.log.warn(
+        xcLine("longlink.tx", "send.skipped_not_open", {
+          type: String(obj.type),
+          hasWs: Boolean(this.ws),
+          readyState: this.ws?.readyState ?? -1,
+          meaning: "frame dropped; socket not OPEN"
+        })
+      );
       return;
     }
-    this.ws.send(JSON.stringify(obj));
-    this.log.debug?.(`longlink.send type=${String(obj.type)}`);
+    const json2 = JSON.stringify(obj);
+    this.ws.send(json2);
+    this.log.info(
+      xcLine("longlink.tx", "send.enqueued", {
+        type: String(obj.type),
+        jsonChars: json2.length
+      })
+    );
   }
   sendReport(params) {
     this.send({
@@ -14367,6 +14655,15 @@ var LonglinkHub = class {
     });
   }
   sendUserDm(params) {
+    this.log.info(
+      xcLine("longlink.tx", "sendUserDm.build", {
+        target_user_id: params.targetUserId,
+        conversation_id: params.conversationId ?? null,
+        message_id: params.messageId ?? null,
+        content_len: params.content.length,
+        meaning: "upstream clawith.user_dm; await user_dm_ok/failed on RX"
+      })
+    );
     const body = {
       type: "clawith.user_dm",
       target_user_id: params.targetUserId,
@@ -14377,6 +14674,15 @@ var LonglinkHub = class {
     this.send(body);
   }
   sendPeerMessage(params) {
+    this.log.info(
+      xcLine("longlink.tx", "sendPeerMessage.build", {
+        target_agent_id: params.targetAgentId,
+        requires_reply: params.requiresReply,
+        conversation_id: params.conversationId ?? null,
+        new_session_id: params.newSessionId ?? null,
+        content_len: params.content.length
+      })
+    );
     const body = {
       type: "clawith.peer_message",
       target_agent_id: params.targetAgentId,
@@ -14412,17 +14718,46 @@ var defaultLog = {
 async function ensureXcclawithLonglinkHub(params) {
   const timeoutMs = params.connectTimeoutMs ?? 25e3;
   const log = params.log ?? defaultLog;
+  xcConsole("info", "ensureHub", "entry", {
+    accountId: params.accountId,
+    timeoutMs,
+    hasCustomTaskHandler: Boolean(params.onGatewayTask)
+  });
   const existing = getHub(params.accountId);
   if (existing) {
-    await existing.waitForOpen(timeoutMs);
+    xcConsole("info", "ensureHub", "reuse_existing_hub", { accountId: params.accountId });
+    try {
+      await existing.waitForOpen(timeoutMs);
+      xcConsole("info", "ensureHub", "reuse.wait_open.ok", { accountId: params.accountId });
+    } catch (e) {
+      xcConsole("error", "ensureHub", "reuse.wait_open.failed", {
+        accountId: params.accountId,
+        err: String(e)
+      });
+      throw e instanceof Error ? e : new Error(String(e));
+    }
     return existing;
   }
+  xcConsole("info", "ensureHub", "no_cached_hub.creating", { accountId: params.accountId });
   const parsed = xcclawithSectionSchema.safeParse(readSectionRaw(params.cfg));
   if (!parsed.success) {
+    xcConsole("error", "ensureHub", "config.parse_failed", {
+      issues: parsed.error.issues,
+      meaning: "channels.xcclawith in openclaw config failed Zod parse"
+    });
     throw new Error(`xcclawith_config_invalid ${JSON.stringify(parsed.error.issues)}`);
   }
   const section = parsed.data;
+  const eff = resolveEffectiveSection(section);
+  xcConsole("info", "ensureHub", "config.ok", {
+    host: eff.host,
+    directoryPort: eff.directoryPort,
+    longlinkPort: eff.longlinkPort,
+    userIdLen: eff.userId.length,
+    apiKeyLen: eff.apiKey.length
+  });
   if (!section.host?.trim() || !section.apiKey) {
+    xcConsole("error", "ensureHub", "config.missing_host_or_key", {});
     throw new Error("xcclawith_host_and_apikey_required");
   }
   const memory = getMemory(params.accountId);
@@ -14435,22 +14770,67 @@ async function ensureXcclawithLonglinkHub(params) {
     }),
     ac.signal
   );
+  xcConsole("info", "ensureHub", "hub.construct.start", { accountId: params.accountId });
   hub.start();
   setHub(params.accountId, hub);
+  xcConsole("info", "ensureHub", "hub.start.registered", { accountId: params.accountId });
   try {
     await hub.waitForOpen(timeoutMs);
+    xcConsole("info", "ensureHub", "wait_open.ok", { accountId: params.accountId });
   } catch (e) {
+    xcConsole("error", "ensureHub", "wait_open.failed_cleanup", {
+      accountId: params.accountId,
+      err: String(e),
+      meaning: "WS did not reach OPEN in time or errored; hub removed from registry"
+    });
     removeHub(params.accountId);
     throw e instanceof Error ? e : new Error(String(e));
   }
   return hub;
 }
 
+// src/clawith-target.ts
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function isClawithUserIdShape(s) {
+  return UUID.test(s);
+}
+function assertStrictClawithUserDmTarget(raw) {
+  let s = (raw ?? "").trim();
+  if (!s) {
+    xcConsole("warn", "target", "assertUserDm.reject", { reason: "empty_to", raw: raw ?? null });
+    throw new Error(
+      "xcclawith_empty_target \u2014 message `to` is required: Clawith users.id as UUID or user:<uuid> from xcclawith_directory (kind=user)."
+    );
+  }
+  const hadUserPrefix = s.toLowerCase().startsWith("user:");
+  if (hadUserPrefix) s = s.slice(5).trim();
+  if (!s) {
+    xcConsole("warn", "target", "assertUserDm.reject", { reason: "empty_after_user_prefix", raw });
+    throw new Error("xcclawith_empty_target_after_user_prefix");
+  }
+  const lower = s.toLowerCase();
+  if (!isClawithUserIdShape(lower)) {
+    xcConsole("warn", "target", "assertUserDm.reject", {
+      reason: "not_rfc4122_uuid",
+      raw,
+      hadUserPrefix,
+      afterStrip: s
+    });
+    throw new Error(
+      `xcclawith_to_must_be_users_id to=${JSON.stringify(raw)} \u2014 pass only bare users.id UUID or user:<uuid> from tool xcclawith_directory (kind=user, field id). Display names, @handles, and emails are not accepted. For another OpenClaw use xcclawith_peer_message with target_agent_id (agents.id from kind=openclaw).`
+    );
+  }
+  xcConsole("info", "target", "assertUserDm.ok", { userId: lower, hadUserPrefix });
+  return lower;
+}
+
 // src/session-keys.ts
 var CLAWITH_SESSION_PEER_PREFIX = "clawith-";
 function sessionPeerFromConversationId(conversationId) {
   const c = conversationId.trim().toLowerCase();
-  return `${CLAWITH_SESSION_PEER_PREFIX}${c}`;
+  const peer = `${CLAWITH_SESSION_PEER_PREFIX}${c}`;
+  xcConsole("debug", "sessionKeys", "sessionPeerFromConversationId", { conversationId: c, peer });
+  return peer;
 }
 function parseConversationIdFromThreadOrPeer(raw) {
   if (raw === void 0 || raw === null) return void 0;
@@ -14459,10 +14839,20 @@ function parseConversationIdFromThreadOrPeer(raw) {
   const lower = t.toLowerCase();
   if (lower.startsWith(CLAWITH_SESSION_PEER_PREFIX)) {
     const rest = t.slice(CLAWITH_SESSION_PEER_PREFIX.length).trim();
-    if (isClawithUserIdShape(rest)) return rest.toLowerCase();
+    if (isClawithUserIdShape(rest)) {
+      const cid = rest.toLowerCase();
+      xcConsole("info", "sessionKeys", "parseConversationId.from_clawith_prefix", { raw: t, conversationId: cid });
+      return cid;
+    }
+    xcConsole("warn", "sessionKeys", "parseConversationId.prefix_bad_uuid", { raw: t, rest });
     return void 0;
   }
-  if (isClawithUserIdShape(t)) return t.toLowerCase();
+  if (isClawithUserIdShape(t)) {
+    const cid = t.toLowerCase();
+    xcConsole("info", "sessionKeys", "parseConversationId.bare_uuid", { conversationId: cid });
+    return cid;
+  }
+  xcConsole("warn", "sessionKeys", "parseConversationId.unrecognized", { raw: t });
   return void 0;
 }
 
@@ -14570,37 +14960,67 @@ var chatPlugin = createChatChannelPlugin({
       channel: CHANNEL_ID,
       sendText: async (params) => {
         const accountId = normalizeAccountId(params.accountId);
+        xcConsole("info", "outbound.sendText", "step1.entry", {
+          accountId,
+          rawTo: params.to,
+          threadId: params.threadId ?? null,
+          textLen: (params.text ?? "").length
+        });
+        xcConsole("info", "outbound.sendText", "step2.ensure_longlink", { accountId });
         const hub = await ensureXcclawithLonglinkHub({
           cfg: params.cfg,
           accountId,
           connectTimeoutMs: 25e3
         });
+        xcConsole("info", "outbound.sendText", "step3.hub_ready", { accountId });
         const memory = getMemory(accountId);
         const sectionParsed = xcclawithSectionSchema.safeParse(readSectionRaw2(params.cfg));
         if (!sectionParsed.success) {
+          xcConsole("error", "outbound.sendText", "step3b.config_invalid", {
+            issues: sectionParsed.error.issues
+          });
           throw new Error(
             `xcclawith_config_invalid ${JSON.stringify(sectionParsed.error.issues)}`
           );
         }
-        const targetUserId = await resolveOutboundTargetToUserId({
-          rawTo: params.to,
-          section: resolveEffectiveSection(sectionParsed.data)
+        xcConsole("info", "outbound.sendText", "step4.assert_to", {
+          note: "must be users.id UUID or user:<uuid>"
         });
+        const targetUserId = assertStrictClawithUserDmTarget(params.to);
         const fromThread = parseConversationIdFromThreadOrPeer(params.threadId);
         const existing = memory.getUserConversation(targetUserId);
         const conversationId = fromThread ?? existing ?? crypto.randomUUID();
+        xcConsole("info", "outbound.sendText", "step5.conversation_chosen", {
+          targetUserId,
+          fromThread: fromThread ?? null,
+          storedConversation: existing ?? null,
+          chosenConversationId: conversationId,
+          source: fromThread ? "threadId" : existing ? "memory" : "new_random_uuid"
+        });
         if (fromThread && existing && fromThread !== existing) {
-          console.warn(
-            `[xcclawith] threadId conversation ${fromThread} overrides stored ${existing} for user ${targetUserId}`
-          );
+          xcConsole("warn", "outbound.sendText", "step5b.thread_overrides_memory", {
+            fromThread,
+            existing,
+            targetUserId
+          });
         }
         memory.setUserConversation(targetUserId, conversationId);
+        xcConsole("info", "outbound.sendText", "step6.memory_updated", { targetUserId, conversationId });
+        xcConsole("info", "outbound.sendText", "step7.longlink_sendUserDm", {
+          note: "async ack: clawith.user_dm_ok or user_dm_failed on wire"
+        });
         hub.sendUserDm({
           targetUserId,
           content: params.text,
           conversationId
         });
-        return { channel: CHANNEL_ID, messageId: `xcclawith-dm-${Date.now()}`, conversationId };
+        const messageId = `xcclawith-dm-${Date.now()}`;
+        xcConsole("info", "outbound.sendText", "step8.return_to_openclaw", {
+          messageId,
+          conversationId,
+          meaning: "OpenClaw may show success before Clawith ack arrives"
+        });
+        return { channel: CHANNEL_ID, messageId, conversationId };
       }
     }
   }
@@ -14610,17 +15030,18 @@ var xcclawithChannelPlugin = {
   messaging: {
     targetResolver: {
       looksLikeId: (_raw, normalized) => {
-        const s = (normalized ?? _raw).trim();
-        return isClawithUserIdShape(normalizeClawithTargetUserId(s));
+        let s = (normalized ?? _raw).trim();
+        if (s.toLowerCase().startsWith("user:")) s = s.slice(5).trim();
+        return isClawithUserIdShape(s.toLowerCase());
       },
-      hint: "Clawith: prefer bare users.id UUID or user:<uuid> when known; else @handle / email / display_name (directory). Thread: clawith-<conversation_id>."
+      hint: "Clawith: message `to` must be user:<uuid> or bare users.id only (from xcclawith_directory). threadId: conversation UUID or clawith-<uuid>. Peer bots: xcclawith_peer_message + agents.id UUID."
     }
   },
   agentPrompt: {
     messageToolHints: () => [
-      "Clawith / xcclawith: OpenClaw session peer id is clawith-<conversation_id> (same UUID as Clawith converter). Reuse a thread by passing message tool threadId = that conversation UUID (or clawith-<uuid>).",
-      "Clawith / xcclawith: Message `to` \u2014 if task payload, tool result, or context includes the Clawith users.id (UUID) or user:<uuid>, pass that value unchanged as `to`. Do not substitute display_name or @label when an id is available.",
-      "Clawith / xcclawith: Only when no user id is available, use @username / email / display_name (directory exact match). If lookup is ambiguous or fails, use xcclawith_directory then user:<uuid>. For OpenClaw bots use xcclawith_peer_message (kind=openclaw)."
+      "Clawith / xcclawith \u2014 Before ANY user DM: call tool xcclawith_directory (GET /api/gateway/directory) with q or omit q to list; copy kind=user \u2192 id, then message with to=user:<id> or bare UUID. Names, @handles, emails are NOT accepted in `to` \u2014 the channel does not resolve them.",
+      "Clawith / xcclawith: To reach another OpenClaw: xcclawith_directory (kind=openclaw) \u2192 xcclawith_peer_message with target_agent_id = that row's id (UUID only).",
+      "Clawith / xcclawith: Session peer id is clawith-<conversation_id>. Reuse a thread via message tool threadId = that UUID (or clawith-<uuid>)."
     ]
   },
   gateway: {
@@ -14632,55 +15053,103 @@ var xcclawithChannelPlugin = {
         error: (m) => log?.error?.(m) ?? console.error(m),
         debug: (m) => log?.debug?.(m)
       };
+      xcBoth(sink, "info", "gateway", "startAccount.entry", {
+        accountId: ctx.accountId,
+        channel: CHANNEL_ID
+      });
       let parsed;
       try {
         parsed = xcclawithSectionSchema.safeParse(readSectionRaw2(ctx.cfg));
-      } catch {
-        sink.warn("xcclawith.config_parse_error");
+      } catch (e) {
+        xcBoth(sink, "warn", "gateway", "startAccount.config_parse_threw", { err: String(e) });
         return;
       }
       if (!parsed.success) {
-        sink.warn(`xcclawith.config_invalid ${JSON.stringify(parsed.error.issues)}`);
+        xcBoth(sink, "warn", "gateway", "startAccount.config_invalid", {
+          issues: parsed.error.issues
+        });
         return;
       }
       const section = parsed.data;
+      const eff = resolveEffectiveSection(section);
+      xcBoth(sink, "info", "gateway", "startAccount.config_ok", {
+        host: eff.host,
+        longlinkPort: eff.longlinkPort,
+        directoryPort: eff.directoryPort,
+        userIdLen: eff.userId.length
+      });
       const memory = getMemory(ctx.accountId);
+      xcBoth(sink, "info", "gateway", "startAccount.remove_old_hub", { accountId: ctx.accountId });
       removeHub(ctx.accountId);
       if (!ctx.channelRuntime) {
-        sink.warn("xcclawith.channel_runtime_missing");
+        xcBoth(sink, "warn", "gateway", "startAccount.channel_runtime_missing", {
+          meaning: "cannot dispatch inbound DMs without channelRuntime"
+        });
         return;
       }
       const rt = ctx.channelRuntime;
+      xcBoth(sink, "info", "gateway", "startAccount.channel_runtime_ok", {});
       const hub = new LonglinkHub(section, memory, sink, async ({ eventId, payload }) => {
         const p = payload && typeof payload === "object" ? payload : {};
         const msg = p.message;
+        xcBoth(sink, "info", "gateway.task", "received", {
+          eventId,
+          diagnostics: formatGatewayTaskDiagnostics(p)
+        });
         const userId = extractTaskUserIdFromPayload(p);
         if (!userId) {
           const messageKeys = msg && typeof msg === "object" && !Array.isArray(msg) ? Object.keys(msg).join(",") : typeof msg;
-          sink.warn(
-            `xcclawith.task_missing_user eventId=${eventId} payloadKeys=${Object.keys(p).join(",")} messageKeys=${messageKeys}`
-          );
+          xcBoth(sink, "warn", "gateway.task", "missing_user_id", {
+            eventId,
+            payloadKeys: Object.keys(p).join(","),
+            messageKeys,
+            meaning: "extractTaskUserIdFromPayload found nothing; check Clawith payload shape"
+          });
           return;
         }
+        xcBoth(sink, "info", "gateway.task", "user_id_resolved", { eventId, userId });
         const text = extractTaskText(msg);
+        xcBoth(sink, "info", "gateway.task", "text_extracted", {
+          eventId,
+          textLen: text.length,
+          preview: text.slice(0, 120)
+        });
         let conversationId = extractConversationIdFromTaskPayload(p, msg);
         if (!conversationId) {
           conversationId = crypto.randomUUID();
-          sink.warn(
-            `xcclawith.task_missing_conversation_id eventId=${eventId} userId=${userId} synthesized=${conversationId}`
-          );
+          xcBoth(sink, "warn", "gateway.task", "conversation_id_synthesized", {
+            eventId,
+            userId,
+            conversationId,
+            meaning: "no converter/conversation on payload; new thread key for OpenClaw"
+          });
         } else {
           conversationId = conversationId.trim().toLowerCase();
+          xcBoth(sink, "info", "gateway.task", "conversation_id_from_payload", {
+            eventId,
+            conversationId
+          });
         }
         memory.setUserConversation(userId, conversationId);
         const sessionPeerId = sessionPeerFromConversationId(conversationId);
         const requiresReply = extractRequiresReplyFromTaskPayload(p, msg);
+        xcBoth(sink, "info", "gateway.task", "session_mapping", {
+          eventId,
+          userId,
+          conversationId,
+          sessionPeerId,
+          requiresReply
+        });
         if (requiresReply) {
           sink.debug?.(
-            `xcclawith.task_requires_reply_true eventId=${eventId} conversationId=${conversationId}`
+            `[xcclawith][gateway.task] requires_reply=true eventId=${eventId} conversationId=${conversationId}`
           );
         }
         let accumulated = "";
+        xcBoth(sink, "info", "gateway.task", "dispatchInbound.begin", {
+          eventId,
+          sessionPeerId
+        });
         await dispatchInboundDirectDmWithRuntime({
           cfg: cfgWithXcclawithDmScopeDefault(ctx.cfg),
           // Gateway passes `channelRuntime` = PluginRuntime["channel"]; dispatch expects `{ channel: that }`.
@@ -14703,9 +15172,19 @@ var xcclawithChannelPlugin = {
           originatingTo: userId,
           deliver: async (out) => {
             const chunk = (out.text ?? "").trim();
-            if (!chunk) return;
+            if (!chunk) {
+              xcBoth(sink, "debug", "gateway.deliver", "skip_empty_chunk", { eventId });
+              return;
+            }
             accumulated = accumulated ? `${accumulated}
 ${chunk}` : chunk;
+            xcBoth(sink, "info", "gateway.deliver", "outbound_chunk", {
+              eventId,
+              userId,
+              conversationId,
+              chunkLen: chunk.length,
+              accumulatedLen: accumulated.length
+            });
             hub.sendUserDm({
               targetUserId: userId,
               content: chunk,
@@ -14714,21 +15193,35 @@ ${chunk}` : chunk;
             });
           },
           onRecordError: (err) => {
-            sink.error(`xcclawith.record_inbound_session_error ${String(err)}`);
+            xcBoth(sink, "error", "gateway.dispatch", "record_inbound_session_error", {
+              err: String(err)
+            });
           },
           onDispatchError: (err, info) => {
-            sink.error(`xcclawith.dispatch_error kind=${info.kind} ${String(err)}`);
+            xcBoth(sink, "error", "gateway.dispatch", "dispatch_error", {
+              kind: info.kind,
+              err: String(err)
+            });
           }
+        });
+        xcBoth(sink, "info", "gateway.task", "dispatchInbound.end", {
+          eventId,
+          accumulatedLen: accumulated.length
         });
       }, ctx.abortSignal);
       hub.start();
       setHub(ctx.accountId, hub);
-      sink.info(`xcclawith.gateway_started accountId=${ctx.accountId}`);
+      xcBoth(sink, "info", "gateway", "startAccount.longlink_started", {
+        accountId: ctx.accountId,
+        meaning: "blocking on abort signal"
+      });
       await untilAbort(ctx.abortSignal);
+      xcBoth(sink, "info", "gateway", "startAccount.abort_wait_done", { accountId: ctx.accountId });
     },
     stopAccount: async (ctx) => {
+      xcBoth(ctx.log, "info", "gateway", "stopAccount.entry", { accountId: ctx.accountId });
       removeHub(ctx.accountId);
-      ctx.log?.info?.(`xcclawith.gateway_stopped accountId=${ctx.accountId}`);
+      xcBoth(ctx.log, "info", "gateway", "stopAccount.hub_removed", { accountId: ctx.accountId });
     }
   },
   directory: {
@@ -14736,10 +15229,25 @@ ${chunk}` : chunk;
       const { cfg, accountId, query, limit } = params;
       const acc = resolveAccount(cfg, accountId);
       const eff = resolveEffectiveSection(acc);
+      xcConsole("info", "directory.listPeersLive", "request", {
+        accountId: acc.accountId,
+        q: query ?? null,
+        limit: limit ?? null,
+        host: eff.host
+      });
       const res = await fetchGatewayDirectory({
         section: eff,
         q: query ?? void 0,
-        limit: limit ?? void 0
+        limit: limit ?? void 0,
+        log: {
+          info: (m) => console.info(m),
+          debug: (m) => console.debug(m)
+        }
+      });
+      xcConsole("info", "directory.listPeersLive", "mapped", {
+        rows: res.items.length,
+        users: res.items.filter((i) => i.kind === "user").length,
+        openclaw: res.items.filter((i) => i.kind === "openclaw").length
       });
       return res.items.map((it) => ({
         kind: it.kind === "openclaw" ? "channel" : "user",

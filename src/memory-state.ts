@@ -1,5 +1,7 @@
 /** In-process routing state (lost on gateway restart). */
 
+import { xcConsole } from "./trace-log.js";
+
 export class ClawithMemoryState {
   /** Clawith users.id -> web DM conversation_id (converter) */
   readonly userConversationIds = new Map<string, string>();
@@ -14,7 +16,17 @@ export class ClawithMemoryState {
     const cid = conversationId.trim().toLowerCase();
     const uid = userId.trim().toLowerCase();
     const prev = this.userConversationIds.get(uid);
-    if (prev && prev !== cid) this.conversationUserIds.delete(prev);
+    if (prev && prev !== cid) {
+      xcConsole("info", "memory", "userConversation.remap", {
+        userId: uid,
+        previousConversationId: prev,
+        newConversationId: cid,
+        reason: "binding changed for same user",
+      });
+      this.conversationUserIds.delete(prev);
+    } else {
+      xcConsole("debug", "memory", "userConversation.set", { userId: uid, conversationId: cid });
+    }
     this.userConversationIds.set(uid, cid);
     this.conversationUserIds.set(cid, uid);
   }
@@ -28,6 +40,7 @@ export class ClawithMemoryState {
   }
 
   setPeerConversation(agentId: string, conversationId: string): void {
+    xcConsole("info", "memory", "peerConversation.set", { agentId, conversationId });
     this.peerConversationIds.set(agentId, conversationId);
   }
 
@@ -36,6 +49,7 @@ export class ClawithMemoryState {
   }
 
   setPeerNewSession(agentId: string, sessionId: string): void {
+    xcConsole("info", "memory", "peerNewSession.set", { agentId, sessionId });
     this.peerNewSessionIds.set(agentId, sessionId);
   }
 

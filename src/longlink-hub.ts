@@ -3,6 +3,7 @@ import { buildLonglinkWsUrl } from "./urls.js";
 import type { ClawithMemoryState } from "./memory-state.js";
 import type { XcclawithSection } from "./schema.js";
 import { resolveEffectiveSection } from "./schema.js";
+import { xcLine } from "./trace-log.js";
 
 type LogSink = {
   info: (m: string) => void;
@@ -37,14 +38,25 @@ export class LonglinkHub {
     private readonly abortSignal: AbortSignal,
   ) {
     this.eff = resolveEffectiveSection(_section);
+    this.log.info(
+      xcLine("longlink.hub", "constructor", {
+        host: this.eff.host,
+        longlinkPort: this.eff.longlinkPort,
+        directoryPort: this.eff.directoryPort,
+        userIdLen: this.eff.userId.length,
+        apiKeyLen: this.eff.apiKey.length,
+      }),
+    );
   }
 
   start(): void {
     this.stopped = false;
+    this.log.info(xcLine("longlink.hub", "start", { note: "connect() scheduled, abort listener registered" }));
     this.connect();
     this.abortSignal.addEventListener(
       "abort",
       () => {
+        this.log.warn(xcLine("longlink.hub", "abort_signal", { action: "stop()" }));
         this.stop();
       },
       { once: true },
@@ -56,21 +68,33 @@ export class LonglinkHub {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+      this.log.info(xcLine("longlink.hub", "stop.cleared_reconnect_timer", {}));
     }
     if (this.ws) {
       try {
+        const rs = this.ws.readyState;
+        this.log.info(xcLine("longlink.hub", "stop.closing_ws", { readyState: rs }));
         this.ws.close();
-      } catch {
-        /* ignore */
+      } catch (e) {
+        this.log.warn(xcLine("longlink.hub", "stop.ws_close_error", { err: String(e) }));
       }
       this.ws = null;
     }
-    this.log.info("longlink.stopped");
+    this.log.info(xcLine("longlink.hub", "stop.complete", { meaning: "no more reconnects until start()" }));
   }
 
   private scheduleReconnect(ms: number): void {
-    if (this.stopped) return;
+    if (this.stopped) {
+      this.log.debug?.(xcLine("longlink.hub", "reconnect.skipped_stopped", { ms }));
+      return;
+    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.log.warn(
+      xcLine("longlink.hub", "reconnect.scheduled", {
+        delayMs: ms,
+        reason: "socket closed or failed; will call connect() again",
+      }),
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -78,32 +102,61 @@ export class LonglinkHub {
   }
 
   private connect(): void {
-    if (this.stopped) return;
+    if (this.stopped) {
+      this.log.debug?.(xcLine("longlink.hub", "connect.skipped_stopped", {}));
+      return;
+    }
     const url = buildLonglinkWsUrl(
       this.eff.host,
       this.eff.longlinkPort,
       this.eff.apiKey,
       this.eff.userId,
     );
-    this.log.info(`longlink.connecting url=${scrubUrl(url)}`);
+    this.log.info(
+      xcLine("longlink.ws", "connect.attempt", {
+        scrubbedUrl: scrubUrl(url),
+        meaning: "opening WebSocket to Clawith longlink",
+      }),
+    );
 
     const ws = new WebSocket(url);
     this.ws = ws;
 
     ws.on("open", () => {
-      this.log.info("longlink.open");
+      this.log.info(
+        xcLine("longlink.ws", "open", {
+          readyState: ws.readyState,
+          meaning: "TLS/WS handshake ok; can send clawith.user_dm / peer_message",
+        }),
+      );
     });
 
     ws.on("message", (data) => {
-      void this.handleRawMessage(String(data));
+      const raw = String(data);
+      this.log.debug?.(
+        xcLine("longlink.ws", "message.raw", { chars: raw.length, preview: raw.slice(0, 120) }),
+      );
+      void this.handleRawMessage(raw);
     });
 
     ws.on("error", (err) => {
-      this.log.error(`longlink.ws_error ${String(err)}`);
+      this.log.error(
+        xcLine("longlink.ws", "socket_error", {
+          err: String(err),
+          meaning: "network/TLS error; close event usually follows",
+        }),
+      );
     });
 
     ws.on("close", (code, reason) => {
-      this.log.warn(`longlink.close code=${code} reason=${reason.toString()}`);
+      this.log.warn(
+        xcLine("longlink.ws", "close", {
+          code,
+          reason: reason.toString(),
+          stopped: this.stopped,
+          meaning: this.stopped ? "expected after stop()" : "connection lost; scheduling reconnect",
+        }),
+      );
       this.ws = null;
       if (!this.stopped) this.scheduleReconnect(3_000);
     });
@@ -113,38 +166,96 @@ export class LonglinkHub {
     let frame: DownFrame;
     try {
       frame = JSON.parse(raw) as DownFrame;
-    } catch {
-      this.log.warn(`longlink.json_parse_error preview=${raw.slice(0, 200)}`);
+    } catch (e) {
+      this.log.warn(
+        xcLine("longlink.rx", "json_parse_error", {
+          preview: raw.slice(0, 200),
+          err: String(e),
+          meaning: "server sent non-JSON; ignored",
+        }),
+      );
       return;
     }
 
     const t = frame.type;
-    this.log.debug?.(`longlink.frame type=${t} id=${frame.id ?? ""}`);
+    this.log.debug?.(
+      xcLine("longlink.rx", "frame.parsed", {
+        type: t,
+        id: frame.id ?? null,
+        ts: frame.ts ?? null,
+      }),
+    );
 
     if (t === "session.ready") {
-      this.log.info(`longlink.session_ready id=${frame.id ?? ""}`);
+      this.log.info(xcLine("longlink.rx", "session.ready.top_level", { frameId: frame.id ?? "" }));
       return;
     }
 
     if (t === "heartbeat" || t === "ping" || t === "pong" || t === "ack") {
+      this.log.debug?.(xcLine("longlink.rx", "control_frame_ignored", { type: t }));
       return;
     }
 
-    if (t === "event" && frame.payload && typeof frame.payload === "object") {
+    if (t !== "event") {
+      this.log.warn(
+        xcLine("longlink.rx", "unknown_frame_type", {
+          type: t,
+          id: frame.id,
+          meaning: "not handled by xcclawith; check Clawith protocol version",
+        }),
+      );
+      return;
+    }
+
+    if (frame.payload && typeof frame.payload === "object") {
       const src = frame.payload.source;
+      const payloadKeys = Object.keys(frame.payload).join(",");
+      this.log.info(
+        xcLine("longlink.rx", "event", {
+          source: String(src),
+          eventFrameId: frame.id ?? "",
+          payloadKeys,
+        }),
+      );
+
       if (src === "session.ready") {
-        this.log.info(`longlink.session_ready id=${frame.id ?? ""}`);
+        this.log.info(xcLine("longlink.rx", "session.ready.in_event", { frameId: frame.id ?? "" }));
         return;
       }
 
       const eventId = frame.id;
       if (typeof eventId !== "string" || !eventId) {
-        this.log.warn(`longlink.event_missing_id source=${String(src)}`);
+        this.log.warn(
+          xcLine("longlink.rx", "event.missing_event_id", {
+            source: String(src),
+            meaning: "cannot correlate; gateway.task dispatch skipped",
+          }),
+        );
         return;
       }
 
       if (src === "gateway.task") {
-        await this.onGatewayTask({ eventId, payload: frame.payload });
+        this.log.info(
+          xcLine("longlink.rx", "gateway.task.dispatch_begin", {
+            eventId,
+            payloadKeys,
+          }),
+        );
+        try {
+          await this.onGatewayTask({ eventId, payload: frame.payload });
+          this.log.info(
+            xcLine("longlink.rx", "gateway.task.dispatch_end", { eventId, status: "ok" }),
+          );
+        } catch (e) {
+          this.log.error(
+            xcLine("longlink.rx", "gateway.task.dispatch_end", {
+              eventId,
+              status: "error",
+              err: String(e),
+              meaning: "handler threw; error logged, longlink stays up",
+            }),
+          );
+        }
         return;
       }
 
@@ -153,7 +264,21 @@ export class LonglinkHub {
         const uid = frame.payload.target_user_id;
         if (typeof cid === "string" && typeof uid === "string") {
           this.memory.setUserConversation(uid, cid);
-          this.log.debug?.(`longlink.user_dm_ok userId=${uid} conversationId=${cid}`);
+          this.log.info(
+            xcLine("longlink.rx", "user_dm_ok", {
+              target_user_id: uid,
+              conversation_id: cid,
+              meaning: "Clawith accepted outbound user_dm; memory updated",
+            }),
+          );
+        } else {
+          this.log.warn(
+            xcLine("longlink.rx", "user_dm_ok.malformed", {
+              hasCid: typeof cid === "string",
+              hasUid: typeof uid === "string",
+              payloadKeys,
+            }),
+          );
         }
         return;
       }
@@ -163,9 +288,16 @@ export class LonglinkHub {
         const tid = frame.payload.target_user_id;
         const cid = frame.payload.conversation_id;
         this.log.warn(
-          `longlink.user_dm_failed message=${msg}` +
-            (typeof tid === "string" ? ` target_user_id=${tid}` : "") +
-            (typeof cid === "string" ? ` conversation_id=${cid}` : ""),
+          xcLine("longlink.rx", "user_dm_failed", {
+            message: msg,
+            target_user_id: typeof tid === "string" ? tid : null,
+            conversation_id: typeof cid === "string" ? cid : null,
+            payloadKeys,
+            meaning:
+              msg.includes("not found") || msg.includes("Not found")
+                ? "users.id unknown to gateway or not visible to this bot"
+                : "see message from Clawith",
+          }),
         );
         return;
       }
@@ -175,18 +307,48 @@ export class LonglinkHub {
         const aid = frame.payload.target_agent_id;
         if (typeof cid === "string" && typeof aid === "string") {
           this.memory.setPeerConversation(aid, cid);
-          this.log.debug?.(`longlink.peer_ok agentId=${aid} conversationId=${cid}`);
+          this.log.info(
+            xcLine("longlink.rx", "peer_message_ok", {
+              target_agent_id: aid,
+              conversation_id: cid,
+            }),
+          );
+        } else {
+          this.log.warn(
+            xcLine("longlink.rx", "peer_message_ok.malformed", { payloadKeys }),
+          );
         }
         return;
       }
 
       if (src === "clawith.peer_message_failed") {
         this.log.warn(
-          `longlink.peer_failed message=${String(frame.payload.message)} code=${String(frame.payload.code)} http=${String(frame.payload.httpStatus)} retry_after=${String(frame.payload.retry_after_seconds)}`,
+          xcLine("longlink.rx", "peer_message_failed", {
+            message: String(frame.payload.message),
+            code: String(frame.payload.code),
+            httpStatus: String(frame.payload.httpStatus),
+            retry_after_seconds: String(frame.payload.retry_after_seconds),
+            payloadKeys,
+          }),
         );
         return;
       }
 
+      this.log.warn(
+        xcLine("longlink.rx", "event.unhandled_source", {
+          source: String(src),
+          eventId,
+          payloadKeys,
+          meaning: "add handler in longlink-hub if this source is expected",
+        }),
+      );
+    } else {
+      this.log.warn(
+        xcLine("longlink.rx", "event.bad_payload", {
+          type: t,
+          meaning: "type=event but payload missing or not object",
+        }),
+      );
     }
   }
 
@@ -197,11 +359,28 @@ export class LonglinkHub {
   waitForOpen(timeoutMs: number): Promise<void> {
     const ws = this.ws;
     if (!ws) {
+      this.log.error(
+        xcLine("longlink.ws", "waitForOpen.reject", {
+          reason: "no_socket",
+          meaning: "connect() not run yet or stop() cleared ws",
+        }),
+      );
       return Promise.reject(new Error("xcclawith_longlink_no_socket"));
     }
     if (ws.readyState === WebSocket.OPEN) {
+      this.log.debug?.(
+        xcLine("longlink.ws", "waitForOpen.already_open", { readyState: ws.readyState }),
+      );
       return Promise.resolve();
     }
+
+    this.log.info(
+      xcLine("longlink.ws", "waitForOpen.blocking", {
+        readyState: ws.readyState,
+        timeoutMs,
+        meaning: "0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED",
+      }),
+    );
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -216,15 +395,32 @@ export class LonglinkHub {
       };
 
       const timer = setTimeout(() => {
-        finish(() =>
-          reject(new Error(`xcclawith_longlink_connect_timeout_${timeoutMs}ms`)),
-        );
+        finish(() => {
+          this.log.error(
+            xcLine("longlink.ws", "waitForOpen.timeout", {
+              timeoutMs,
+              readyState: ws.readyState,
+            }),
+          );
+          reject(new Error(`xcclawith_longlink_connect_timeout_${timeoutMs}ms`));
+        });
       }, timeoutMs);
 
-      const onOpen = () => finish(() => resolve());
-      const onErr = () => finish(() => reject(new Error("xcclawith_longlink_ws_error")));
+      const onOpen = () =>
+        finish(() => {
+          this.log.info(xcLine("longlink.ws", "waitForOpen.resolved_open", {}));
+          resolve();
+        });
+      const onErr = () =>
+        finish(() => {
+          this.log.error(xcLine("longlink.ws", "waitForOpen.resolved_error", {}));
+          reject(new Error("xcclawith_longlink_ws_error"));
+        });
       const onClose = () =>
-        finish(() => reject(new Error("xcclawith_longlink_ws_closed_before_open")));
+        finish(() => {
+          this.log.error(xcLine("longlink.ws", "waitForOpen.resolved_close_before_open", {}));
+          reject(new Error("xcclawith_longlink_ws_closed_before_open"));
+        });
 
       ws.on("open", onOpen);
       ws.on("error", onErr);
@@ -238,11 +434,24 @@ export class LonglinkHub {
 
   send(obj: Record<string, unknown>): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.log.warn(`longlink.send_skipped_not_open type=${String(obj.type)}`);
+      this.log.warn(
+        xcLine("longlink.tx", "send.skipped_not_open", {
+          type: String(obj.type),
+          hasWs: Boolean(this.ws),
+          readyState: this.ws?.readyState ?? -1,
+          meaning: "frame dropped; socket not OPEN",
+        }),
+      );
       return;
     }
-    this.ws.send(JSON.stringify(obj));
-    this.log.debug?.(`longlink.send type=${String(obj.type)}`);
+    const json = JSON.stringify(obj);
+    this.ws.send(json);
+    this.log.info(
+      xcLine("longlink.tx", "send.enqueued", {
+        type: String(obj.type),
+        jsonChars: json.length,
+      }),
+    );
   }
 
   sendReport(params: {
@@ -264,6 +473,15 @@ export class LonglinkHub {
     conversationId?: string;
     messageId?: string;
   }): void {
+    this.log.info(
+      xcLine("longlink.tx", "sendUserDm.build", {
+        target_user_id: params.targetUserId,
+        conversation_id: params.conversationId ?? null,
+        message_id: params.messageId ?? null,
+        content_len: params.content.length,
+        meaning: "upstream clawith.user_dm; await user_dm_ok/failed on RX",
+      }),
+    );
     const body: Record<string, unknown> = {
       type: "clawith.user_dm",
       target_user_id: params.targetUserId,
@@ -281,6 +499,15 @@ export class LonglinkHub {
     conversationId?: string;
     newSessionId?: string;
   }): void {
+    this.log.info(
+      xcLine("longlink.tx", "sendPeerMessage.build", {
+        target_agent_id: params.targetAgentId,
+        requires_reply: params.requiresReply,
+        conversation_id: params.conversationId ?? null,
+        new_session_id: params.newSessionId ?? null,
+        content_len: params.content.length,
+      }),
+    );
     const body: Record<string, unknown> = {
       type: "clawith.peer_message",
       target_agent_id: params.targetAgentId,
