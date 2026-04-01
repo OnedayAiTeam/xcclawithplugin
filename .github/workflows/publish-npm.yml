@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver only, must match package.json (e.g. 1.0.2). Uses the default branch as it exists when you click Run."
+        required: true
+        type: string
+      retag:
+        description: "Delete the remote v-tag on GitHub first, then recreate it on this commit (use when the tag pointed to the wrong commit)."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -15,6 +26,68 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve version and tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "tag=v$VER" >> $GITHUB_OUTPUT
+          echo "Publishing version $VER (tag v$VER)"
+
+      - name: Verify package.json version
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          if [ "${{ steps.meta.outputs.version }}" != "$PKG_VER" ]; then
+            echo "::error::package.json version is $PKG_VER but expected ${{ steps.meta.outputs.version }} (workflow input or git tag)."
+            exit 1
+          fi
+
+      - name: Delete remote tag (retag)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.retag == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = "${{ steps.meta.outputs.tag }}";
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+              core.info("Deleted remote tag " + tag);
+            } catch (e) {
+              if (e.status === 404) core.info("Remote tag not found, continuing");
+              else throw e;
+            }
+
+      - name: Reject if remote tag points at another commit
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.retag != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = "${{ steps.meta.outputs.tag }}";
+            try {
+              const { data } = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: "tags/" + tag,
+              });
+              if (data.object.sha !== context.sha) {
+                core.setFailed(
+                  "Remote tag " +
+                    tag +
+                    " exists but points to a different commit. Push your package.json bump to the default branch, or run again with **retag** checked to move the tag to this commit."
+                );
+              }
+            } catch (e) {
+              if (e.status === 404) return;
+              throw e;
+            }
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -23,16 +96,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Verify tag matches package.json version
-        run: |
-          TAG_VER="${GITHUB_REF#refs/tags/v}"
-          PKG_VER=$(node -p "require('./package.json').version")
-          if [ "$TAG_VER" != "$PKG_VER" ]; then
-            echo "::error::Git tag v${TAG_VER} must equal package.json version ${PKG_VER}. Bump version, commit, then tag again."
-            exit 1
-          fi
-          echo "Publishing version ${PKG_VER}"
 
       - name: Build
         run: npm run build
@@ -45,9 +108,38 @@ jobs:
       - name: Create npm pack tarball for Release
         run: npm pack
 
+      - name: Create git tag (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = "${{ steps.meta.outputs.tag }}";
+            const sha = context.sha;
+            try {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: "refs/tags/" + tag,
+                sha,
+              });
+              core.info("Created tag " + tag);
+            } catch (e) {
+              if (e.status !== 422) throw e;
+              const { data } = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: "tags/" + tag,
+              });
+              if (data.object.sha !== sha) {
+                throw new Error("Tag " + tag + " already exists on a different commit");
+              }
+              core.info("Tag already points to this commit");
+            }
+
       - name: Create GitHub Release and attach tarball
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
           files: "*.tgz"
           generate_release_notes: true
         env:
