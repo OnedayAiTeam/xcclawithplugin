@@ -24,6 +24,7 @@ var DEFAULT_DIRECTORY_PORT = 3008;
 var DEFAULT_LONGLINK_PORT = 38438;
 var DEFAULT_LONGLINK_USER_ID = "agent0323";
 var DEFAULT_LONGLINK_ACK_TIMEOUT_MS = 6e4;
+var LONGLINK_HEARTBEAT_INTERVAL_MS = 3e4;
 
 // src/gateway-payload.ts
 function pickString(obj, keys) {
@@ -602,6 +603,7 @@ function removeHub(accountId) {
 }
 
 // src/longlink-hub.ts
+import { randomUUID } from "crypto";
 import WebSocket from "ws";
 
 // node_modules/zod/v4/classic/external.js
@@ -14411,6 +14413,7 @@ var LonglinkHub = class {
   }
   ws = null;
   reconnectTimer = null;
+  heartbeatTimer = null;
   stopped = false;
   eff;
   userDmAckWaiters = [];
@@ -14430,6 +14433,7 @@ var LonglinkHub = class {
   }
   stop() {
     this.stopped = true;
+    this.clearHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -14503,6 +14507,34 @@ var LonglinkHub = class {
       );
     }
   }
+  clearHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+  /**
+   * Sends control frames without info-level spam (periodic heartbeat, pong replies).
+   */
+  sendControl(obj) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify(obj));
+    this.log.debug?.(
+      xcLine("longlink.tx", "send.control", { type: String(obj.type) })
+    );
+  }
+  armHeartbeat(ws) {
+    this.clearHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.stopped) return;
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      this.sendControl({
+        type: "heartbeat",
+        id: randomUUID(),
+        ts: Date.now()
+      });
+    }, LONGLINK_HEARTBEAT_INTERVAL_MS);
+  }
   scheduleReconnect(ms) {
     if (this.stopped) {
       this.log.debug?.(xcLine("longlink.hub", "reconnect.skipped_stopped", { ms }));
@@ -14525,6 +14557,7 @@ var LonglinkHub = class {
       this.log.debug?.(xcLine("longlink.hub", "connect.skipped_stopped", {}));
       return;
     }
+    this.clearHeartbeat();
     const url2 = buildLonglinkWsUrl(
       this.eff.host,
       this.eff.longlinkPort,
@@ -14546,6 +14579,7 @@ var LonglinkHub = class {
           meaning: "TLS/WS handshake ok; can send clawith.user_dm"
         })
       );
+      this.armHeartbeat(ws);
     });
     ws.on("message", (data) => {
       const raw = String(data);
@@ -14563,6 +14597,7 @@ var LonglinkHub = class {
       );
     });
     ws.on("close", (code, reason) => {
+      this.clearHeartbeat();
       this.log.warn(
         xcLine("longlink.ws", "close", {
           code,
@@ -14601,7 +14636,13 @@ var LonglinkHub = class {
       this.log.info(xcLine("longlink.rx", "session.ready.top_level", { frameId: frame.id ?? "" }));
       return;
     }
-    if (t === "heartbeat" || t === "ping" || t === "pong" || t === "ack") {
+    if (t === "ping") {
+      const id = typeof frame.id === "string" && frame.id.trim() ? frame.id : randomUUID();
+      this.sendControl({ type: "pong", id, ts: Date.now() });
+      this.log.debug?.(xcLine("longlink.rx", "ping_replied_pong", { id }));
+      return;
+    }
+    if (t === "heartbeat" || t === "pong" || t === "ack") {
       this.log.debug?.(xcLine("longlink.rx", "control_frame_ignored", { type: t }));
       return;
     }

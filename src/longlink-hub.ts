@@ -1,8 +1,12 @@
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { buildLonglinkWsUrl } from "./urls.js";
 import type { ClawithMemoryState } from "./memory-state.js";
 import type { XcclawithSection } from "./schema.js";
-import { DEFAULT_LONGLINK_ACK_TIMEOUT_MS } from "./constants.js";
+import {
+  DEFAULT_LONGLINK_ACK_TIMEOUT_MS,
+  LONGLINK_HEARTBEAT_INTERVAL_MS,
+} from "./constants.js";
 import { resolveEffectiveSection } from "./schema.js";
 import { xcLine } from "./trace-log.js";
 
@@ -36,6 +40,7 @@ export type GatewayTaskHandler = (params: {
 export class LonglinkHub {
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private readonly eff: ReturnType<typeof resolveEffectiveSection>;
   private readonly userDmAckWaiters: UserDmAckWaiter[] = [];
@@ -76,6 +81,7 @@ export class LonglinkHub {
 
   stop(): void {
     this.stopped = true;
+    this.clearHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -155,6 +161,37 @@ export class LonglinkHub {
     }
   }
 
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Sends control frames without info-level spam (periodic heartbeat, pong replies).
+   */
+  private sendControl(obj: Record<string, unknown>): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify(obj));
+    this.log.debug?.(
+      xcLine("longlink.tx", "send.control", { type: String(obj.type) }),
+    );
+  }
+
+  private armHeartbeat(ws: WebSocket): void {
+    this.clearHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.stopped) return;
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      this.sendControl({
+        type: "heartbeat",
+        id: randomUUID(),
+        ts: Date.now(),
+      });
+    }, LONGLINK_HEARTBEAT_INTERVAL_MS);
+  }
+
   private scheduleReconnect(ms: number): void {
     if (this.stopped) {
       this.log.debug?.(xcLine("longlink.hub", "reconnect.skipped_stopped", { ms }));
@@ -178,6 +215,7 @@ export class LonglinkHub {
       this.log.debug?.(xcLine("longlink.hub", "connect.skipped_stopped", {}));
       return;
     }
+    this.clearHeartbeat();
     const url = buildLonglinkWsUrl(
       this.eff.host,
       this.eff.longlinkPort,
@@ -201,6 +239,7 @@ export class LonglinkHub {
           meaning: "TLS/WS handshake ok; can send clawith.user_dm",
         }),
       );
+      this.armHeartbeat(ws);
     });
 
     ws.on("message", (data) => {
@@ -221,6 +260,7 @@ export class LonglinkHub {
     });
 
     ws.on("close", (code, reason) => {
+      this.clearHeartbeat();
       this.log.warn(
         xcLine("longlink.ws", "close", {
           code,
@@ -263,7 +303,15 @@ export class LonglinkHub {
       return;
     }
 
-    if (t === "heartbeat" || t === "ping" || t === "pong" || t === "ack") {
+    if (t === "ping") {
+      const id =
+        typeof frame.id === "string" && frame.id.trim() ? frame.id : randomUUID();
+      this.sendControl({ type: "pong", id, ts: Date.now() });
+      this.log.debug?.(xcLine("longlink.rx", "ping_replied_pong", { id }));
+      return;
+    }
+
+    if (t === "heartbeat" || t === "pong" || t === "ack") {
       this.log.debug?.(xcLine("longlink.rx", "control_frame_ignored", { type: t }));
       return;
     }

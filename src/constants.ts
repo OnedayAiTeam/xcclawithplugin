@@ -10,3 +10,6 @@ export const DEFAULT_LONGLINK_USER_ID = "agent0323";
 
 /** Max wait for `clawith.user_dm_ok` before rejecting outbound sends. */
 export const DEFAULT_LONGLINK_ACK_TIMEOUT_MS = 60_000;
+
+/** Periodic uplink keepalive JSON `type: "heartbeat"` while longlink WebSocket is open. */
+export const LONGLINK_HEARTBEAT_INTERVAL_MS = 10_000;
