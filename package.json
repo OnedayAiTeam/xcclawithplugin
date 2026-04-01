@@ -1,6 +1,6 @@
 {
   "name": "xcclawithplugin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenClaw channel plugin for Clawith Longlink (user_dm over WebSocket).",
   "type": "module",
   "repository": {
