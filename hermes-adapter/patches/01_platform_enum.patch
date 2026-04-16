@@ -1,0 +1,11 @@
+# Patch 1: Add CLAWITH to Platform enum
+# File: gateway/config.py — after QQBOT = "qqbot" (around line 69)
+# Apply: patch -p1 < patches/01_platform_enum.patch
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -67,6 +67,7 @@ class Platform(Enum):
+     WEIXIN = "weixin"
+     BLUEBUBBLES = "bluebubbles"
+     QQBOT = "qqbot"
++    CLAWITH = "clawith"
+

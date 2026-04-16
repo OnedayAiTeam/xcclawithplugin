@@ -1,0 +1,21 @@
+# Patch 2: Add Clawith platform handler in gateway/run.py
+# Insert after Platform.QQBOT handler (around line 2560), before "return None"
+# Apply: patch -p1 < patches/02_run_gateway.patch
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -2558,6 +2558,13 @@ class GatewayRunner:
+             if not check_qqbot_requirements():
+                 logger.warning("QQBot: aiohttp not installed")
+             return QQAdapter(config)
++
++        elif platform == Platform.CLAWITH:
++            from gateway.platforms.clawith import (
++                ClawithAdapter, check_clawith_requirements,
++            )
++            if not check_clawith_requirements():
++                logger.warning("Clawith: websockets/httpx not installed or host/api_key not set")
++            return ClawithAdapter(config)
++
+         return None
+ 
+     def _is_user_authorized(self, source: SessionSource) -> bool:
