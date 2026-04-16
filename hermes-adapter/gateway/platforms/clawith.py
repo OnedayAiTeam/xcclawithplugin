@@ -217,9 +217,17 @@ class ClawithAdapter(BasePlatformAdapter):
     async def _heartbeat_loop(self, ws) -> None:
         """Send periodic heartbeat frames."""
         try:
-            while self._running and ws == self._ws and not ws.closed:
+            while self._running:
                 await asyncio.sleep(LONGLINK_HEARTBEAT_INTERVAL_S)
-                if self._ws != ws or ws.closed:
+                if self._ws is not ws:
+                    break
+                # websockets 16: ws.state is a State enum; websockets < 14: ws.closed
+                try:
+                    from websockets import State
+                    is_closed = ws.state == State.CLOSED
+                except (ImportError, AttributeError):
+                    is_closed = getattr(ws, 'closed', True)
+                if is_closed:
                     break
                 await ws.send(json.dumps({
                     "type": "heartbeat",
@@ -228,6 +236,8 @@ class ClawithAdapter(BasePlatformAdapter):
                 }))
                 logger.debug("[%s] Heartbeat sent", self.name)
         except asyncio.CancelledError:
+            pass
+        except websockets.ConnectionClosed:
             pass
         except Exception as e:
             logger.warning("[%s] Heartbeat loop error: %s", self.name, e)
@@ -308,6 +318,11 @@ class ClawithAdapter(BasePlatformAdapter):
 
         source = payload.get("source", "") if isinstance(payload, dict) else ""
 
+        # -- session.ready (can come as event type) ------------------------
+        if source == "session.ready":
+            logger.info("[%s] session.ready received (as event)", self.name)
+            return
+
         # -- gateway.task: inbound user message ----------------------------
         if source == "gateway.task":
             await self._handle_gateway_task(frame_id, payload)
@@ -346,6 +361,20 @@ class ClawithAdapter(BasePlatformAdapter):
             logger.warning("[%s] gateway.task missing event id, skipping", self.name)
             return
 
+        # Log payload structure for debugging
+        logger.info("[%s] gateway.task payload_keys=%s",
+                     self.name, list(payload.keys()))
+        # Log message_data structure
+        msg_data = payload.get("message")
+        if isinstance(msg_data, dict):
+            logger.info("[%s] message_data keys=%s relationships=%s",
+                        self.name, list(msg_data.keys()),
+                        "present" if payload.get("relationships") is not None else "absent")
+            # Log all potential user_id fields
+            for k in ("user_id", "userId", "sender_id", "senderId", "from_user_id", "author_id"):
+                if k in msg_data:
+                    logger.info("[%s]   %s = %r", self.name, k, str(msg_data[k])[:50])
+
         # Deduplicate
         if self._dedup.is_duplicate(event_id):
             logger.debug("[%s] Duplicate task %s, skipping", self.name, event_id)
@@ -358,6 +387,8 @@ class ClawithAdapter(BasePlatformAdapter):
             text = (message_data.get("text", "")
                     or message_data.get("content", "")
                     or "")
+            logger.info("[%s] message_data keys=%s",
+                        self.name, list(message_data.keys()))
         else:
             text = str(message_data) if message_data else ""
 
@@ -365,19 +396,19 @@ class ClawithAdapter(BasePlatformAdapter):
             logger.debug("[%s] Empty gateway.task message, skipping", self.name)
             return
 
-        # Extract user info
-        user_id = ""
-        if isinstance(message_data, dict):
-            user_id = (message_data.get("user_id", "")
-                       or message_data.get("sender_id", "")
-                       or "")
-        if not user_id:
-            user_id = payload.get("user_id", "") or ""
+        # Extract user_id with robust logic (matching xcclawithplugin TS)
+        user_id = self._extract_user_id_from_payload(payload)
 
         # Extract conversation info
         conversation_id = ""
         if isinstance(message_data, dict):
-            conversation_id = message_data.get("conversation_id", "") or ""
+            conversation_id = (message_data.get("conversation_id", "")
+                               or message_data.get("converter_id", "")
+                               or "")
+        if not conversation_id:
+            conversation_id = (payload.get("conversation_id", "")
+                               or payload.get("converter_id", "")
+                               or "")
 
         if not conversation_id and user_id:
             conversation_id = self._user_conversations.get(user_id.lower(), "")
@@ -394,7 +425,8 @@ class ClawithAdapter(BasePlatformAdapter):
         self._pending_tasks[event_id] = user_id
 
         logger.info("[%s] Task from user=%s conv=%s: %s",
-                     self.name, user_id[:20], conversation_id[:20], text[:80])
+                     self.name, (user_id or "NONE")[:20],
+                     conversation_id[:20], text[:80])
 
         # Build source for Hermes
         source = self.build_source(
@@ -418,6 +450,16 @@ class ClawithAdapter(BasePlatformAdapter):
 
     # -- Outbound messaging -------------------------------------------------
 
+    def _is_ws_open(self) -> bool:
+        """Check if WebSocket is open (works with websockets 14+ and 16+)."""
+        if not self._ws:
+            return False
+        try:
+            from websockets import State
+            return self._ws.state == State.OPEN
+        except (ImportError, AttributeError):
+            return getattr(self._ws, 'closed', True) is False
+
     async def send(
         self,
         chat_id: str,
@@ -431,7 +473,7 @@ class ClawithAdapter(BasePlatformAdapter):
         """
         metadata = metadata or {}
 
-        if not self._ws or self._ws.closed:
+        if not self._is_ws_open():
             return SendResult(success=False,
                               error="Clawith WebSocket not connected")
 
@@ -524,6 +566,94 @@ class ClawithAdapter(BasePlatformAdapter):
         return []
 
     # -- Helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _pick_string(obj: Dict[str, Any], keys: tuple) -> Optional[str]:
+        """Pick the first non-empty string from a list of keys."""
+        for k in keys:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    @staticmethod
+    def _extract_user_id(message: Any) -> Optional[str]:
+        """Extract user id from gateway.task payload.message (many possible shapes)."""
+        if not message or not isinstance(message, dict):
+            return None
+        # Direct fields
+        direct = ClawithAdapter._pick_string(message, (
+            "user_id", "userId", "sender_id", "senderId",
+            "from_user_id", "fromUserId", "sender_user_id", "senderUserId",
+            "author_id", "authorId", "from_id", "fromId",
+            "participant_id", "participantId", "creator_id", "creatorId",
+        ))
+        if direct:
+            return direct
+        # Nested objects
+        for key in ("user", "sender", "author", "from", "participant", "contact"):
+            nested = message.get(key)
+            if nested and isinstance(nested, dict):
+                uid = ClawithAdapter._pick_string(nested, ("id", "user_id", "userId"))
+                if uid:
+                    return uid
+        # Meta/metadata fields
+        for wrap_key in ("meta", "metadata", "attributes", "data"):
+            wrap = message.get(wrap_key)
+            if wrap and isinstance(wrap, dict):
+                uid = ClawithAdapter._pick_string(wrap, (
+                    "user_id", "userId", "sender_id", "senderId"))
+                if uid:
+                    return uid
+        return None
+
+    @staticmethod
+    def _extract_user_id_from_payload(payload: Dict[str, Any]) -> Optional[str]:
+        """Resolve user id from full gateway.task payload."""
+        # Try message first
+        from_msg = ClawithAdapter._extract_user_id(payload.get("message"))
+        if from_msg:
+            return from_msg
+        # Try relationships array
+        rel = payload.get("relationships")
+        if isinstance(rel, list):
+            for item in rel:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind", item.get("type", item.get("role", "")))).lower()
+                if kind and "user" in kind:
+                    uid = ClawithAdapter._pick_string(item, ("id", "user_id", "userId", "uuid"))
+                    if uid:
+                        return uid
+                    nested_uid = ClawithAdapter._extract_user_id(item)
+                    if nested_uid:
+                        return nested_uid
+            # Fallback: any relationship with an id
+            for item in rel:
+                if not isinstance(item, dict):
+                    continue
+                uid = ClawithAdapter._pick_string(item, ("id", "user_id", "userId", "uuid"))
+                if uid:
+                    return uid
+                nested_uid = ClawithAdapter._extract_user_id(item)
+                if nested_uid:
+                    return nested_uid
+        # Try relationships dict
+        if isinstance(rel, dict):
+            for key in ("user", "sender", "contact", "participant", "customer"):
+                single = rel.get(key)
+                if single and isinstance(single, dict):
+                    uid = ClawithAdapter._pick_string(single, ("id", "user_id", "userId"))
+                    if uid:
+                        return uid
+        # Top-level payload
+        top = ClawithAdapter._pick_string(payload, (
+            "user_id", "userId", "sender_user_id", "senderUserId",
+            "from_user_id", "fromUserId",
+        ))
+        if top:
+            return top
+        return None
 
     def _build_ws_url(self) -> str:
         """Build the WebSocket URL with auth params."""
